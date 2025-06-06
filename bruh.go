@@ -38,6 +38,8 @@ func symmetricDecrypt(encryptedData []byte, key []byte) ([]byte, error) {
 	return decryptedData, err
 }
 
+// ////////////////    HMAC    //////////////////
+
 func createHMAC(data []byte, key []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(data)
@@ -51,6 +53,8 @@ func verifyHMAC(data []byte, tag []byte, key []byte) bool {
 
 	return hmac.Equal(mac.Sum(nil), tag)
 }
+
+//////////////////     END     //////////////////
 
 func genPubAndPrivKey() (*ecdh.PrivateKey, *ecdh.PublicKey) {
 	curve := ecdh.P256()
@@ -118,4 +122,8 @@ func main() {
 	fmt.Printf("Whats good my fello friends\n")
 
 	//ecdhTest()
+	var message = "hello"
+
+	var mac = createHMAC(message, sha256.New())
+
 }
