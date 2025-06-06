@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/aes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"log"
 )
 
 const blockSize = 16
@@ -49,6 +52,40 @@ func verifyHMAC(data []byte, tag []byte, key []byte) bool {
 	return hmac.Equal(mac.Sum(nil), tag)
 }
 
+func genPubAndPrivKey() (*ecdh.PrivateKey, *ecdh.PublicKey) {
+	curve := ecdh.P256()
+	privateKey, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+	publicKey := privateKey.PublicKey()
+
+	return privateKey, publicKey
+}
+
+func genSecret(publicKey *ecdh.PublicKey, privateKey *ecdh.PrivateKey) []byte {
+	secret, err := privateKey.ECDH(publicKey)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	return secret
+}
+
+func ecdhTest() {
+	bobPrivKey, bobPubKey := genPubAndPrivKey()
+	alicePrivKey, alicePubKey := genPubAndPrivKey()
+
+	bobSecret := genSecret(alicePubKey, bobPrivKey)
+	aliceSecret := genSecret(bobPubKey, alicePrivKey)
+
+	if !bytes.Equal(bobSecret, aliceSecret) {
+		fmt.Printf("FAILED ECDH\n")
+	} else {
+		fmt.Printf("Successful ECDH!\n")
+	}
+}
+
 // ////////////////    ECDSA    //////////////////
 // Utilizing ECDSA to sign and verify delivery of an AES key
 func createKeyPair() (*ecdsa.PrivateKey, crypto.PublicKey) {
@@ -78,5 +115,7 @@ func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
 
 func main() {
 
-	fmt.Printf("Whats good my fello friends")
+	fmt.Printf("Whats good my fello friends\n")
+
+	//ecdhTest()
 }
