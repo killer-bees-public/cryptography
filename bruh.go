@@ -38,6 +38,31 @@ func symmetricDecrypt(encryptedData []byte, key []byte) ([]byte, error) {
 	return decryptedData, err
 }
 
+func testSymmetric() () {
+	secretMessage := "KillerBeesKnees1"
+	//                123 123 123 132
+	fmt.Printf("Here is the message: " + secretMessage + "\n")
+	byteslice := []byte(secretMessage)
+
+	symKey := "i6Bwnnu8jbUbw1Mo"
+	//         123 123 123 123
+	keyBytes := []byte(symKey)
+	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
+	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the decrypted message: " + string(decryptedMessage) + "\n")
+}
+
 func createHMAC(data []byte, key []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(data)
@@ -116,6 +141,8 @@ func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
 func main() {
 
 	fmt.Printf("Whats good my fello friends\n")
+
+	testSymmetric()
 
 	//ecdhTest()
 }
