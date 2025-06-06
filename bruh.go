@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto"
 	"crypto/aes"
 	"crypto/ecdh"
 	"crypto/ecdsa"
@@ -88,13 +87,14 @@ func ecdhTest() {
 
 // ////////////////    ECDSA    //////////////////
 // Utilizing ECDSA to sign and verify delivery of an AES key
-func createKeyPair() (*ecdsa.PrivateKey, crypto.PublicKey) {
+func createKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		fmt.Errorf("Something went wrong with generating a private key")
 	}
+	publicKey := &privateKey.PublicKey
 
-	return privateKey, privateKey.Public()
+	return privateKey, publicKey
 }
 
 func sign(priv *ecdsa.PrivateKey, message []byte) ([]byte, error) {
@@ -111,11 +111,34 @@ func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
 	return ecdsa.VerifyASN1(pub, slice, sig)
 }
 
+func ecdsaTest() {
+	privateKey, publicKey := createKeyPair()
+	secretMessage := "What the helliantte"
+
+	signature, err := sign(privateKey, []byte(secretMessage))
+	if err != nil {
+		fmt.Println("Signature failed!")
+	}
+	fmt.Println("Would you like to modify the secret message? If so, enter here, otherwise, press enter.")
+	fmt.Print("Enter (empty for original): ")
+	var newMessage string
+	fmt.Scanln(&newMessage)
+	if newMessage != "" {
+		secretMessage = newMessage
+	}
+	if verify(publicKey, []byte(secretMessage), signature) == true {
+		fmt.Println("Successful operation! Message is correct")
+	} else {
+		fmt.Println("The message was modified in transit")
+	}
+	fmt.Printf("Message: %s\n", secretMessage)
+
+}
+
 //////////////////     END     //////////////////
 
 func main() {
-
-	fmt.Printf("Whats good my fello friends\n")
-
+	ecdsaTest()
 	//ecdhTest()
+
 }
