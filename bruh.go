@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -15,34 +16,38 @@ import (
 
 const blockSize = 16
 
-func symmetricEncrypt(data []byte, key []byte) ([]byte, error) {
+func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
-	cipher, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf(err.Error())
 	}
 
+	ctr := cipher.NewCTR(block, nonce)
+
 	encryptedData := make([]byte, len(data))
-	cipher.Encrypt(encryptedData, data)
+	ctr.XORKeyStream(encryptedData, data)
 
 	return encryptedData, err
 }
 
-func symmetricDecrypt(encryptedData []byte, key []byte) ([]byte, error) {
+func symmetricDecrypt(encryptedData []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
-	cipher, err := aes.NewCipher(key)
-	decryptedData := make([]byte, len(encryptedData))
-	cipher.Decrypt(decryptedData, encryptedData)
+	block, err := aes.NewCipher(key)
 
+	ctr := cipher.NewCTR(block, nonce)
+
+	decryptedData := make([]byte, len(encryptedData))
+	ctr.XORKeyStream(decryptedData, encryptedData)
 	return decryptedData, err
 }
 
 func testSymmetric() {
-	secretMessage := "KillerBeesKnees1"
+	secretMessage := "KillerBeesKnees1KillerBeesKnees1"
 	//                123 123 123 132
 	fmt.Printf("Here is the message: " + secretMessage + "\n")
 	byteslice := []byte(secretMessage)
@@ -50,15 +55,17 @@ func testSymmetric() {
 	symKey := "i6Bwnnu8jbUbw1Mo"
 	//         123 123 123 123
 	keyBytes := []byte(symKey)
-	fmt.Println(len(keyBytes))
-	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes)
 
+	nonce := make([]byte, len(symKey))
+	rand.Read(nonce)
+
+	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes, nonce)
 	if err != nil {
 		log.Fatal("Error: %v", err)
 	}
 
-	fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
-	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes)
+	//fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
+	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes, nonce)
 
 	if err != nil {
 		log.Fatal("Error: %v", err)
