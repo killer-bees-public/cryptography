@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto"
 	"crypto/aes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 )
@@ -44,6 +48,33 @@ func verifyHMAC(data []byte, tag []byte, key []byte) bool {
 
 	return hmac.Equal(mac.Sum(nil), tag)
 }
+
+// ////////////////    ECDSA    //////////////////
+// Utilizing ECDSA to sign and verify delivery of an AES key
+func createKeyPair() (*ecdsa.PrivateKey, crypto.PublicKey) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		fmt.Errorf("Something went wrong with generating a private key")
+	}
+
+	return privateKey, privateKey.Public()
+}
+
+func sign(priv *ecdsa.PrivateKey, message []byte) ([]byte, error) {
+	var arr = sha256.Sum256(message)
+	slice := arr[:]
+	asn1, err := ecdsa.SignASN1(rand.Reader, priv, slice)
+
+	return asn1, err
+}
+
+func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
+	var arr = sha256.Sum256(message)
+	slice := arr[:]
+	return ecdsa.VerifyASN1(pub, slice, sig)
+}
+
+//////////////////     END     //////////////////
 
 func main() {
 
