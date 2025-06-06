@@ -20,7 +20,11 @@ func symmetricEncrypt(data []byte, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
 	cipher, err := aes.NewCipher(key)
-	var encryptedData []byte
+	if err != nil {
+		return nil, fmt.Errorf(err.Error())
+	}
+
+	encryptedData := make([]byte, len(data))
 	cipher.Encrypt(encryptedData, data)
 
 	return encryptedData, err
@@ -31,10 +35,36 @@ func symmetricDecrypt(encryptedData []byte, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
 	cipher, err := aes.NewCipher(key)
-	var decryptedData []byte
+	decryptedData := make([]byte, len(encryptedData))
 	cipher.Decrypt(decryptedData, encryptedData)
 
 	return decryptedData, err
+}
+
+func testSymmetric() {
+	secretMessage := "KillerBeesKnees1"
+	//                123 123 123 132
+	fmt.Printf("Here is the message: " + secretMessage + "\n")
+	byteslice := []byte(secretMessage)
+
+	symKey := "i6Bwnnu8jbUbw1Mo"
+	//         123 123 123 123
+	keyBytes := []byte(symKey)
+	fmt.Println(len(keyBytes))
+	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
+	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the decrypted message: " + string(decryptedMessage) + "\n")
 }
 
 func createHMAC(data []byte, key []byte) []byte {
@@ -138,7 +168,7 @@ func ecdsaTest() {
 //////////////////     END     //////////////////
 
 func main() {
-	ecdsaTest()
+	testSymmetric()
 	//ecdhTest()
 
 }
