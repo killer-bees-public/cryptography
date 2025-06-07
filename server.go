@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const fileToCopy = "recursiveBruh.txt"
+const fileToCopy = "SECRET-MESSAGE.txt"
 
 // Returns handshake from
 func returnHandshake(conn net.Conn) []byte {
