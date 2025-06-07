@@ -189,14 +189,13 @@ func ecdsaTest() {
 
 //////////////////     END     //////////////////
 
-// func main() {
-// 	testSymmetric()
-// 	//ecdhTest()
+func main() {
+	testSymmetric()
+	ecdhTest()
 
 	if testHMAC() {
 		fmt.Println("What the helly bron james")
 	} else {
 		fmt.Println("What the helly burton")
 	}
-
 }
