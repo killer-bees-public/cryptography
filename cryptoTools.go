@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,11 +11,41 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log"
 )
 
-const blockSize = 16
+const blockSize = 32
+
+func addToPacket(dstPacket []byte, srcBytes []byte) []byte {
+	var sizeOfBytes uint16 = uint16(len(srcBytes))
+	size := make([]byte, 2)
+	binary.BigEndian.PutUint16(size, sizeOfBytes)
+	dstPacket = append(dstPacket, size...)
+	dstPacket = append(dstPacket, srcBytes...)
+	//fmt.Println("adding", size, "bytes to packet")
+	return dstPacket
+}
+
+// Reads section of packet and return.
+func readSectionOfPacket(reader *bufio.Reader) []byte {
+
+	sizeOfSection := make([]byte, 2)
+	byteOne, _ := reader.ReadByte()
+	byteTwo, _ := reader.ReadByte()
+	sizeOfSection[0] = byteOne
+	sizeOfSection[1] = byteTwo
+	size := binary.BigEndian.Uint16(sizeOfSection)
+	returnBytes := make([]byte, size)
+
+	for i := 0; i < int(size); i++ {
+		currentByte, _ := reader.ReadByte()
+		returnBytes[i] = currentByte
+	}
+
+	return returnBytes
+}
 
 func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
