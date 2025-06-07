@@ -18,13 +18,8 @@ func send(data []byte, key []byte) ([]byte) {
 	rand.Read(nonce)
 	cipher, _ := symmetricEncrypt(data, key, nonce)
 
-	fmt.Printf("LEN OF CIPHER: %d\n", len(cipher))
-
 	//HMAC the ciphertext, append to cipher
 	hash := createHMAC(cipher, key)
-	fmt.Printf("LEN OF HASH: %d\n", len(hash))
-	fmt.Printf("LEN OF NONCE: %d\n", len(nonce))
-
 
 	cipher = append(cipher, hash...)
 
@@ -35,11 +30,6 @@ func send(data []byte, key []byte) ([]byte) {
 
 	//Send over socket
 	//TODO
-
-	fmt.Printf("LEN OF EVERYTHING: %d\n", len(cipher))
-
-	fmt.Printf("SEND HASH: %s\n", hash)
-	fmt.Printf("SEND NONCE: %s\n", nonce)
 
 	return cipher
 }
@@ -54,22 +44,14 @@ func recv(cipher []byte, buffer *[]byte, key []byte) (bool) {
 	hash := cipher[endOfData : endOfHMAC]
 	nonce := cipher[endOfHMAC : ]
 
-	fmt.Printf("LEN OF HASH: %d\n", len(hash))
-	fmt.Printf("LEN OF NONCE: %d\n", len(nonce))
-	fmt.Printf("LEN OF DATA: %d\n", len(data))
-	fmt.Printf("LEN OF EVERYTHING: %d\n", len(cipher))
-
-	fmt.Printf("RECV HASH: %s\n", hash)
-	fmt.Printf("RECV NONCE: %s\n", nonce)
-
-
-	data, _ = symmetricDecrypt(data, key, nonce)
-
 	if !verifyHMAC(data, hash, key) {
 		//CLOSE CONNECTION
-		fmt.Println("bad hmac!!")
-		//return false
+		fmt.Println("ERROR: Message has been altered during transmission!")
+		fmt.Print("Closing connection...")
+		return false
 	}
+
+	data, _ = symmetricDecrypt(data, key, nonce)
 
 	//Read message into buffer
 	*buffer = data
