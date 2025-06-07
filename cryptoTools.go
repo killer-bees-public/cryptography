@@ -16,7 +16,7 @@ import (
 	"log"
 )
 
-const blockSize = 32
+const blockSize = 16
 
 func addToPacket(dstPacket []byte, srcBytes []byte) []byte {
 	var sizeOfBytes uint16 = uint16(len(srcBytes))
@@ -49,7 +49,7 @@ func readSectionOfPacket(reader *bufio.Reader) []byte {
 
 func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
-		return nil, fmt.Errorf("Incorrect key size")
+		return nil, fmt.Errorf("Encrypt: Incorrect key size")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -66,7 +66,7 @@ func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
 
 func symmetricDecrypt(encryptedData []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
-		return nil, fmt.Errorf("Incorrect key size")
+		return nil, fmt.Errorf("Decrypt: Incorrect key size")
 	}
 	block, err := aes.NewCipher(key)
 

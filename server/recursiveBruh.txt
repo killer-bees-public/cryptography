@@ -1,0 +1,1577 @@
+package main
+
+import (
+	"bufio"
+	"crypto/ecdh"
+	"encoding/binary"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"time"
+)
+
+const fileToCopy = "recursiveBruh.txt"
+
+// Returns handshake from
+func returnHandshake(conn net.Conn) []byte {
+
+	reader := bufio.NewReader(conn)
+
+	serverPrivateKey, serverPublicKey := genPubAndPrivKey()
+
+	// Need digital signature (ecdsa) to verify servers publicKey in Diffie Hellman
+	ecDSAPriv, ecDSAPub := createKeyPair()
+	signature, _ := sign(ecDSAPriv, serverPublicKey.Bytes())
+
+	var sizeOfPacket uint16 = uint16(len(serverPublicKey.Bytes()) + len(signature) + 64 + 2)
+	size := make([]byte, 2)
+	binary.BigEndian.PutUint16(size, sizeOfPacket)
+	var DSAPacket []byte
+	DSAPacket = addToPacket(DSAPacket, serverPublicKey.Bytes())
+	DSAPacket = addToPacket(DSAPacket, signature)
+	DSAPacket = addToPacket(DSAPacket, ecDSAPub.X.Bytes())
+	DSAPacket = addToPacket(DSAPacket, ecDSAPub.Y.Bytes())
+
+	fmt.Println("Sending initial response with DH Public key, signature, and DSA Public Key")
+	conn.Write(DSAPacket)
+
+	time.Sleep(30000)
+	// Next, we'll need to read the response that the client will send with its public key for DH
+	clientPublicKeyRawBytes := readSectionOfPacket(reader)
+	clientPublicKey, err := ecdh.P256().NewPublicKey(clientPublicKeyRawBytes)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Shared Secret AES Key
+	sharedSecret := genSecret(clientPublicKey, serverPrivateKey)
+
+	fmt.Println("Shared Secret:", sharedSecret)
+	return sharedSecret
+}
+
+func sendSecretFile(conn net.Conn, key []byte) {
+	bytes, _ := os.ReadFile("server/recursiveBruh.txt")
+	send(bytes, key, conn)
+	return
+}
+func main() {
+	ln, err := net.Listen("tcp", ":8000")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Listening on port 8000")
+	conn, err := ln.Accept()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	message, err := bufio.NewReader(conn).ReadString('\n')
+	if string(message) == "Hello\n" {
+		fmt.Println("Initializing three way handshake")
+		sharedSecret := returnHandshake(conn)
+		time.Sleep(30000)
+		sendSecretFile(conn, sharedSecret)
+	} else {
+		// Ignore connection
+		return
+	}
+
+}
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"log"
+)
+
+const blockSize = 16
+
+func addToPacket(dstPacket []byte, srcBytes []byte) []byte {
+	var sizeOfBytes uint16 = uint16(len(srcBytes))
+	size := make([]byte, 2)
+	binary.BigEndian.PutUint16(size, sizeOfBytes)
+	dstPacket = append(dstPacket, size...)
+	dstPacket = append(dstPacket, srcBytes...)
+	//fmt.Println("adding", size, "bytes to packet")
+	return dstPacket
+}
+
+// Reads section of packet and return.
+func readSectionOfPacket(reader *bufio.Reader) []byte {
+
+	sizeOfSection := make([]byte, 2)
+	byteOne, _ := reader.ReadByte()
+	byteTwo, _ := reader.ReadByte()
+	sizeOfSection[0] = byteOne
+	sizeOfSection[1] = byteTwo
+	size := binary.BigEndian.Uint16(sizeOfSection)
+	returnBytes := make([]byte, size)
+
+	for i := 0; i < int(size); i++ {
+		currentByte, _ := reader.ReadByte()
+		returnBytes[i] = currentByte
+	}
+
+	return returnBytes
+}
+
+func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
+	if len(key) != blockSize {
+		return nil, fmt.Errorf("Encrypt: Incorrect key size")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf(err.Error())
+	}
+
+	ctr := cipher.NewCTR(block, nonce)
+
+	encryptedData := make([]byte, len(data))
+	ctr.XORKeyStream(encryptedData, data)
+
+	return encryptedData, err
+}
+
+func symmetricDecrypt(encryptedData []byte, key []byte, nonce []byte) ([]byte, error) {
+	if len(key) != blockSize {
+		return nil, fmt.Errorf("Decrypt: Incorrect key size")
+	}
+	block, err := aes.NewCipher(key)
+
+	ctr := cipher.NewCTR(block, nonce)
+
+	decryptedData := make([]byte, len(encryptedData))
+	ctr.XORKeyStream(decryptedData, encryptedData)
+	return decryptedData, err
+}
+
+func testSymmetric() {
+	secretMessage := "KillerBeesKnees1KillerBeesKnees1"
+	//                123 123 123 132
+	fmt.Printf("Here is the message: " + secretMessage + "\n")
+	byteslice := []byte(secretMessage)
+
+	symKey := "i6Bwnnu8jbUbw1Mo"
+	//         123 123 123 123
+	keyBytes := []byte(symKey)
+
+	nonce := make([]byte, len(symKey))
+	rand.Read(nonce)
+
+	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes, nonce)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	//fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
+	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes, nonce)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the decrypted message: " + string(decryptedMessage) + "\n")
+}
+
+func createHMAC(data []byte, key []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+
+	return mac.Sum(nil)
+}
+
+func verifyHMAC(data []byte, tag []byte, key []byte) bool {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+
+	return hmac.Equal(mac.Sum(nil), tag)
+}
+
+func testHMAC() bool {
+	var message string
+	var hash []byte
+	var key []byte
+
+	message = "what the helly bron james"
+	hash = createHMAC([]byte(message), key)
+
+	//CHANGE MESSAGE TO VOID INTEGRITY
+	//message = "what the helly bruh bruh bruh"
+	return verifyHMAC([]byte(message), hash, key)
+}
+
+//////////////////     END     //////////////////
+
+func genPubAndPrivKey() (*ecdh.PrivateKey, *ecdh.PublicKey) {
+	curve := ecdh.P256()
+	privateKey, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+	publicKey := privateKey.PublicKey()
+
+	return privateKey, publicKey
+}
+
+func genSecret(publicKey *ecdh.PublicKey, privateKey *ecdh.PrivateKey) []byte {
+	secret, err := privateKey.ECDH(publicKey)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	return secret
+}
+
+func ecdhTest() {
+	bobPrivKey, bobPubKey := genPubAndPrivKey()
+	alicePrivKey, alicePubKey := genPubAndPrivKey()
+
+	bobSecret := genSecret(alicePubKey, bobPrivKey)
+	aliceSecret := genSecret(bobPubKey, alicePrivKey)
+
+	if !bytes.Equal(bobSecret, aliceSecret) {
+		fmt.Printf("FAILED ECDH\n")
+	} else {
+		fmt.Printf("Successful ECDH!\n")
+	}
+}
+
+// ////////////////    ECDSA    //////////////////
+// Utilizing ECDSA to sign and verify delivery of a public key for DiffHell
+func createKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		fmt.Errorf("Something went wrong with generating a private key")
+	}
+	publicKey := &privateKey.PublicKey
+
+	return privateKey, publicKey
+}
+
+func sign(priv *ecdsa.PrivateKey, message []byte) ([]byte, error) {
+	var arr = sha256.Sum256(message)
+	slice := arr[:]
+	asn1, err := ecdsa.SignASN1(rand.Reader, priv, slice)
+
+	return asn1, err
+}
+
+func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
+	var arr = sha256.Sum256(message)
+	slice := arr[:]
+	return ecdsa.VerifyASN1(pub, slice, sig)
+}
+
+func ecdsaTest() {
+	privateKey, publicKey := createKeyPair()
+	secretMessage := "What the helliantte"
+
+	signature, err := sign(privateKey, []byte(secretMessage))
+	if err != nil {
+		fmt.Println("Signature failed!")
+	}
+	fmt.Println("Would you like to modify the secret message? If so, enter here, otherwise, press enter.")
+	fmt.Print("Enter (empty for original): ")
+	var newMessage string
+	fmt.Scanln(&newMessage)
+	if newMessage != "" {
+		secretMessage = newMessage
+	}
+	if verify(publicKey, []byte(secretMessage), signature) == true {
+		fmt.Println("Successful operation! Message is correct")
+	} else {
+		fmt.Println("The message was modified in transit")
+	}
+	fmt.Printf("Message: %s\n", secretMessage)
+
+}
+
+//////////////////     END     //////////////////
+
+// func main() {
+// 	testSymmetric()
+// 	ecdhTest()
+
+// 	if testHMAC() {
+// 		fmt.Println("What the helly bron james")
+// 	} else {
+// 		fmt.Println("What the helly burton")
+// 	}
+
+// }
+package main
+
+import (
+	"bufio"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"fmt"
+	"log"
+	"math/big"
+	"net"
+	"os"
+	"time"
+)
+
+// Handshake is very simplified from normal TLS, sending first message, returns AES key in byte format
+func initiateHandshake(conn net.Conn) []byte {
+	clientPrivateKey, clientPublicKey := genPubAndPrivKey()
+
+	conn.Write([]byte("Hello\n"))
+	// Wait for a bit for a response
+	time.Sleep(30000)
+	reader := bufio.NewReader(conn)
+
+	// Getting public Key for DH
+	publicKeyRawBytes := readSectionOfPacket(reader)
+	serverPublicKey, _ := ecdh.P256().NewPublicKey(publicKeyRawBytes)
+
+	// Shared Secret AES Key
+	sharedSecret := genSecret(serverPublicKey, clientPrivateKey)
+
+	// Getting signature
+	signatureFromServer := readSectionOfPacket(reader)
+
+	// Reading parameters of ecDSA to generate object that can verify signature
+	bigXBytes := readSectionOfPacket(reader)
+	bigYBytes := readSectionOfPacket(reader)
+	// Assume P256 for curve
+
+	bigX := new(big.Int)
+	bigY := new(big.Int)
+	bigX.SetBytes(bigXBytes)
+	bigY.SetBytes(bigYBytes)
+
+	ecdsaPubKey := ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     bigX,
+		Y:     bigY,
+	}
+
+	if verify(&ecdsaPubKey, publicKeyRawBytes, signatureFromServer) == true {
+		fmt.Println("Server successfully passed ecDSA. Continuing handshake")
+		var DHReturnPacket []byte
+		DHReturnPacket = addToPacket(DHReturnPacket, clientPublicKey.Bytes())
+		n, err := conn.Write(DHReturnPacket)
+		if n == 0 || err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Println("Shared Secret:", sharedSecret)
+		return sharedSecret
+	} else {
+		fmt.Println("Server Failed ecDSA. Terminating handshake...")
+		conn.Close()
+		return nil
+	}
+
+}
+
+func readFile(conn net.Conn, key []byte) bool {
+	reader := bufio.NewReader(conn)
+	var cipherText []byte
+	var err error
+	var by byte
+	for err == nil {
+		by, err = reader.ReadByte()
+		cipherText = append(cipherText, by)
+	}
+	cipherText = cipherText[:len(cipherText)-1]
+	//fmt.Println(string(cipherText))
+
+	var fileBytes []byte
+	fileBytes, success := recv(cipherText, key)
+	//fmt.Println("Decrypted message:", string(fileBytes))
+
+	fd, error := os.Create("client/decryptedFile.txt")
+	fd.Write(fileBytes)
+	if error != nil {
+		log.Fatalf(error.Error())
+	}
+	return success
+}
+
+func main() {
+	conn, err := net.Dial("tcp", "localhost:8000")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Client initializes contact with server
+	sharedSecret := initiateHandshake(conn)
+	if sharedSecret == nil {
+		return
+	}
+
+	time.Sleep(30000)
+	readFile(conn, sharedSecret)
+
+	conn.Close()
+	return
+}
+package main
+
+import (
+	"bufio"
+	"crypto/ecdh"
+	"encoding/binary"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"time"
+)
+
+const fileToCopy = "recursiveBruh.txt"
+
+// Returns handshake from
+func returnHandshake(conn net.Conn) []byte {
+
+	reader := bufio.NewReader(conn)
+
+	serverPrivateKey, serverPublicKey := genPubAndPrivKey()
+
+	// Need digital signature (ecdsa) to verify servers publicKey in Diffie Hellman
+	ecDSAPriv, ecDSAPub := createKeyPair()
+	signature, _ := sign(ecDSAPriv, serverPublicKey.Bytes())
+
+	var sizeOfPacket uint16 = uint16(len(serverPublicKey.Bytes()) + len(signature) + 64 + 2)
+	size := make([]byte, 2)
+	binary.BigEndian.PutUint16(size, sizeOfPacket)
+	var DSAPacket []byte
+	DSAPacket = addToPacket(DSAPacket, serverPublicKey.Bytes())
+	DSAPacket = addToPacket(DSAPacket, signature)
+	DSAPacket = addToPacket(DSAPacket, ecDSAPub.X.Bytes())
+	DSAPacket = addToPacket(DSAPacket, ecDSAPub.Y.Bytes())
+
+	fmt.Println("Sending initial response with DH Public key, signature, and DSA Public Key")
+	conn.Write(DSAPacket)
+
+	time.Sleep(30000)
+	// Next, we'll need to read the response that the client will send with its public key for DH
+	clientPublicKeyRawBytes := readSectionOfPacket(reader)
+	clientPublicKey, err := ecdh.P256().NewPublicKey(clientPublicKeyRawBytes)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Shared Secret AES Key
+	sharedSecret := genSecret(clientPublicKey, serverPrivateKey)
+
+	fmt.Println("Shared Secret:", sharedSecret)
+	return sharedSecret
+}
+
+func sendSecretFile(conn net.Conn, key []byte) {
+	bytes, _ := os.ReadFile("server/recursiveBruh.txt")
+	send(bytes, key, conn)
+	return
+}
+func main() {
+	ln, err := net.Listen("tcp", ":8000")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Listening on port 8000")
+	conn, err := ln.Accept()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	message, err := bufio.NewReader(conn).ReadString('\n')
+	if string(message) == "Hello\n" {
+		fmt.Println("Initializing three way handshake")
+		sharedSecret := returnHandshake(conn)
+		time.Sleep(30000)
+		sendSecretFile(conn, sharedSecret)
+	} else {
+		// Ignore connection
+		return
+	}
+
+}
+### Welcome to QLE encryption. QLE allows you to safely and secur(ish)ly transfer files between two go scripts. QLE utilizes ecDSA, ecDH, AES_CTR, and HMAC to set up a channel to communicate safely between processes 
+
+## To run:
+1. 
+
+On one terminal, run the server with
+```bash
+go run server.go cryptoTools.go send-recv.go
+```
+
+On another terminal, run the client with
+```bash
+go run client.go cryptoTools.go send-recv.go
+```
+
+package main
+
+import (
+	//"bufio"
+	"crypto/rand"
+	"fmt"
+	"log"
+	"net"
+	//"log"
+	//"net"
+	//"os"
+)
+
+const hashSize = 32
+const nonceSize = 16
+
+func send(data []byte, key []byte, conn net.Conn) []byte {
+	//Encrypt message
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	cipher, err := symmetricEncrypt(data, key[:16], nonce)
+	if err != nil {
+		log.Fatalf(err.Error())
+
+	}
+
+	//HMAC the ciphertext, append to cipher
+	hash := createHMAC(cipher, key[16:])
+
+	cipher = append(cipher, hash...)
+
+	//Append nonce too
+	cipher = append(cipher, nonce...)
+
+	//cipher = data + HMAC + nonce
+
+	//Send over socket
+	conn.Write(cipher)
+	fmt.Println("Sending", len(cipher), "Encrypted Bytes to client")
+	return cipher
+}
+
+func recv(cipher []byte, key []byte) ([]byte, bool) {
+	//Calculate indices to slice bytes
+	fmt.Println("Received", len(cipher), "Encrypted Bytes from server")
+	endOfData := len(cipher) - (hashSize + nonceSize)
+	endOfHMAC := len(cipher) - nonceSize
+
+	//Split up bytes
+	data := cipher[0:endOfData]
+	hash := cipher[endOfData:endOfHMAC]
+	nonce := cipher[endOfHMAC:]
+	//fmt.Println(len(cipher))
+
+	if !verifyHMAC(data, hash, key[16:]) {
+		//CLOSE CONNECTION
+		fmt.Println("ERROR: Message has been altered during transmission!")
+		fmt.Println("Closing connection...")
+		return nil, false
+	}
+
+	data, err := symmetricDecrypt(data, key[:16], nonce)
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	//Read message into buffer
+
+	return data, true
+}
+3c9364db1b596de2c551381bf5386c904df3d446
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+	ignorecase = true
+	precomposeunicode = true
+[remote "origin"]
+	url = https://github.com/killer-bees-public/cryptography.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+	vscode-merge-base = origin/main
+	vscode-merge-base = origin/main
+[pull]
+	rebase = false
+xuOKÄ0Å½&ŸbÌeS¶d{XD
+ŞdoŠ¸‚W$m“n°MJšúéww’î^O“ïıæÍT«`»½ºdı.[½4–RÓÎà”°jÒÆ1|è>ÄÒ¹6«ÒÏŒf”êÉÖÉÊ3ø¡¤vÖæ ¼‡òP)nì8õÀr@B-»£Cy]Ë(1:‰/Qlº 8Eìd@RP1S²Ù@äŠgo‚â/¯Õ7Vùéx°,Cv>y½’J£Svq¯>S‹»QìCc,Š	®#¼±Asö¤¾£²M	1	ØÊá-.°ğDdì:Z¾:ØÕ™±È²s´­Y„Œ^#Şô„ù&²ÿ¨çdw´w=ÆóÊc@XÃ‰cf:Ó_Ô‰ˆ÷x+)JMU0´4f040031QrutñuÕËMax6÷ÑìM¯9{wk®+ºqèIOğD¨¢äœÌÔ¼½ô|†ªzäÔ77-^bÕ½­æ¥K—ULQQeAI~H~~N1Heÿ2ş'AÊ’ÿ#¹ÆÏŒ6ÔÓ\ UYœš—¢[”š\R'?·Hğ®Æ­T}¾oÜk¦GuÆ3ËÁÕ•¥Müi¦lw«a.{qİå¶éÍòÎ ÅšKŠxÍX[oÛ6Ş«õ+N¬WÃAzC ÒÄm‚.i§í†®´LÇldÊ“¨n‘ÿ¾ï%ÙN/ëË´‘ÄÃsıÎwÈŒÓlLO?yúËB$7âZÒ\(Ej¾ÈrCqÔéWF]<$ùja²]ÑzKÔb&óÆ²L&³ök!šïiªF%O³¹h¾æBO«ÅL<zúŒ?Lç†¥Ùu7êEQ’éÂĞ8Í’›‘ú,é€öEÑ´Ô	«ù\š\%Cm'Âúğ‘CéÓ\…géDú·Å•ˆÌó,ïÑ—¨£¦”JcOvæ°ÖÉ¥)sMZ¥}‚wƒ!o›ÆİSdy.cmğ®Û‹:wQÇzÛ'¨§ıB&çrydShMX{¼
+SĞÊÜgRÎ^Ü³º£Nb¬VW«øê2ömœHZGºŒÈÉ1§NÌÅqs¨œ+V	uƒ?ß\¾–«‘É¥˜Ç­­}²rĞè“°¶
+÷¢»õrKW–l¨Åÿ¹.ß™İ‰ğ+Ùm…¾5Í-ÀJ³`(‹O÷ºT#İhW3ª: ¶(.à—4g²(¸ÅQõîk•¦2!eñZã¿½õwtÚî.­ıì=zLáßãGQ‡A‘+m ú™KR™HÄYÚ§.=¤¶ñ‡Ôı[s;X^IÚş¸Æ‹[¢Wt2 h=VÏ^,µ.Ÿ¿/÷Î²¶‡Á-çbÔš^0s5µ[e¬Öµı6ô;ƒ\æ¡Á¥“x³y|&C'oNÎÒu¤O^sÊZƒÓ/ÑwiÜ2‡ìÓ¯·]« P‹ûRğ±–tĞŸ¾®{Ö{ÜC=|ş‚îæx½]ƒd•ÜSô_‚º/¤àÙÖÂêFHß ëÂÈ“³Ã£ûˆ¿çÇ‹éÃá)Ä¤»Ã¶v( ¯¼Ï•‘Qß„¼0*ç1¨ºØîVæjºÚ´nÄõªëÑ8Ë,Ñÿ„Ö÷á?%ğÓt©O°Y;Æ¼`İªmŞŠ¼Ê11Q‡¿ÍD1óÎº57#ú¹çĞÈr&Œíø™LÓóLÓ't§Ur@jø.÷û{>¿Œî£“ÃóWC:F‡ø}õ†Ş½9=¦Óó«á«ËÓ«¿XækfËlûÿ`Ú×§QŠÓìw ¸Ùİø±Ô7<?¶¿7Vwıh»–ú¢ê	XğLºã#Óâ-Pˆo}ò_Ê1è,%'e~k©ÏIãŒj‹Æ.æ Ó
+^I-s§/Ì$slùa6é,*GX}mq€Hœƒğ$ä°^ïSØÀøGv¶Äam=ZlAUkáC³ùN­w†GÇ'µÿsÇ	şsò¯ĞnL³ñ\³5ãçrŒGNÒf™£àÙÄİÛ×6`âec—,¯Òg®±µ6¨\@˜veÛ–à\ŸšnpÙ ‡;}‚Q/êÔY¶Æ÷ËÃÓ?†ÇÄ©vóùdZH{mõ¨Lôÿ´L­ìæŒâÀ°Ş(Ü=P9:ä‡õÅİ]ŞòÖ¨T}Æ°ò‚&£B]kÂø%×À4‘©ÂãŠ²)	B{´f9«éôìãşmP¶¡òª±Ñü©‚»MF·€@€bÍÎƒ{{\Ø~íÓ·Z‘3g':H£—’º”ÚĞ\‰Gef/nn^Bx®98>k¨[P|P;ZGğ½íÊ‰YmÄµ´Tüê¨rëmˆgƒ -Ÿ’˜~œ‰ŠÑq`«Ntû°ÿ.ôŞZFGğâpt¾×$2Ç}²ûô¶‡–u˜`:AT…ì‡aæb€:UİöĞûÁ ü<q€xg¼ Nx—­©zÖZÉšXêš5HÔ’»=ª¸"'õ÷Í«„6FvQo.¥ÀõZ?(Bq«±ãg^K%Ÿl7'FhğT§•fš
+•ÊÉ‡aKè}V¦Ze%¥êFšvMpî±‡g±*Æït:¥"ƒŸÚHœ-pOèS†kB¾T9øÄ-ØT°ƒÃ°İËùÂ¬ˆ›=ËÕµÒ"íájQÆ£–Ë3 ©0¬a”hÔË.òú/Ùİ®%¸VŠ€îZÈ^Û‘°unDö·_Y,\]ztp@&/×(Ôf¸æĞla;?Ó;TE;”ÿóMüfWõ5‹–¢péWrBJÃªĞ…2ëuy¸_ nxÛ„Úî'Bü‡#7Fù Ù¸€âaÊÚ!Á lF¿ğèÔeçèZ o+{V:§oo-s“ñ…“%İº‹şíwRxÍXmsÚFîWô+ÖÌ4#ÇvOiÇ1$ö¤v<ÁIÚIóA\,NTfHÆÿ½ÏŞN`§I¾”énoß÷Ù=Â8	épïpÿ‡yİA³@*Ï“³y’æä{f¸ÊEÖÄC”®æy²ÔŞ"9ŸŠ´²-¢Ñ´şšÕ÷8–ó\F•¥é,¨¾¦Uv³i°xÄãYÎ_q2iz-Ï‹•åÆIt3”Ÿõ¨{äyã…Š([Íf"Oe4PZiä½ÿÀ¦´éF¬Ü³JT$ì[‹ü‚D¤i’¶è³×cŠ…òq¦E;½Š8ì5R‘/REJÆm‚vûÍs%i*¢\ËÊ ]³å5î¼†Ö¶M`OÇ=‚';—byª]¨Ehy¼QàÊ
+Ü'TFßÒ¼½F”k®&"šñõkßJÔvÂia<"F}v	”˜7ÂÙÍ¦²¯˜%Øuş|õú¥XóT3¿v´Mš­Öv¡w·¾0á¨ÑºXüŸãò½;2>àİšé[İ\ã\©a±î^§ª¸åš‹
+ğugĞKä"Ë¸ÄõæKÇ"}&DöRá_wı•¶»KkŸîşrOö½'ıU*U¤?© ™Q>ˆIÇÔ¤ÇTş˜š+.+±DùASx~”Ó•ŒÔË£gK¥¿|ß„ËîER×Ğ©eTôÈ¦gŒ\Uîš³5e¿-û@ãPçµFşfñXOºJŞ gœ†­H›,Æ”µ¦u£îb¿9`9¦o›š;A!÷¹ÚåÇšÓjRÖ¬Õ¸…xXÿ»º×˜şz¹:ÊÂ¹Î&ï[ŒºÏ$§ÙV“Üî†IŞ ×ƒ\œ]œœŞü-›p°è>œ#Ü…4}ÓpøQÇàw©Ì…ÁF„Ã!o3Pİrhw+R9^mJÏƒÉ¨kQ˜$è¿C­ûàŸò§ªR› ³TŒqA«UÊ¼ÒÂÇ”éŒñ¼6²©UÖ,”ØëgG #ËiëŠŸŠ8^Q˜&Š> @uj&=ªDÃV¹=ß²şåì>=;¹|1 ‹Ápx‚ïëWôöÕyŸÎ/¯/^Ÿ_ÿÅ4‰]L!ÛşƒhŸJ(6D³vVäÍîÆGCßà²¯¿7vwmk›uµOÔ(x¤Üú?ñÄ°x‹,ÄZ›ìÊ"ÜaACr´Ho5ôjÌ8>Rm^9ÅÄÔ„B‰Ôğó2‰G¾MóBf_JìÀ£ 4q>,÷Ûäºd‡ıCİ[|··n-9£Š=·P-DşSËSÁiÿ¬ğ-6;sŒ§?;ÿuaÚd˜„WPMÇŒŸ!ÙI›aö÷.GnŞ:€—„ÆY–¥õ\åhhP¨ 3õÎ¶#N¹6UÕà°!vt÷é@pB-©a§S°Ö¾ŸŸœÿ1è»Úôç;q&ôZêá"ŠPÿãE¬iw,1{Ãz¡põ€åğ„Ö7wwùÈ›\Æòš•%ÌÊäDÚ/™¦‘ˆ%W”Œ)°Y¨Gëq’R_Çg@3ú´AØ®™Õ˜åÈKEºkg”éæ2É²jåAŒ¾½t®t½¶éK¥ÈÓÒ0Á¥dÊ†.…Êi	¬Ä£Ì§œ^\Ü¼óLq°}öÖP–RñQ©hiÁ-Wv¬Ït!®¹¥ÀW•[oCÜÀRl—D÷cOˆ­˜è@öşør8Sİ5¡ÅÉğ²[2ƒmÒç+ğã»’59ÁpàŒ(ÙvÍÌØ v²hºõ¦÷•FØ~bâ­nğÚ (aUÖ¢Ê^«)K`)cVQîzTqé
+ÿmLêïª-V*ÏEñæP¸~âBk…nÑvlÏ«±äÉv³c¸ò´àLã@Æb´cÓ°Fô.YÄ#Z%Šå í,aîÑÃ€‘Xãw:S–@O•Ì¸'´)Á5!]Êóxb6;,ÊÉÁ0¬Oøb6ÏWÄÅ¤r"U·pµ )ç£Ë;#sF‚5ÊmcyùÎ—ìfS\ÍEÈî’H_Ûá°2ëL‹lo¿²è40qiQ¯GyºXƒPíáC“¹®üDíPaîPöçíø-0Ì<®Ëk-ƒÌ¸_ŠI©Êd¾7`•ûEà†¶ÕtCÙ}Ç(Ä?™6ÊƒfåŠ\—õ¼_Í‡Î'ıcó“Ò5&à¬3I¸prVÕÏz­L	¶¼Vµ™³¥©]ãbv]¤yÂ—Q¦4ìÎë™.“š&_àU¾H4§Ã
+@ú÷›ùP8í‰èğ@<º£ñÑáÓ½nw¯FÑA4>w~ÚFÇ<ò²ßşöPñx+)JMU07b040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgx$·ÿÚÉ¹¯ÌçSÿs¡3xÂİGb 7U‘xÎMj!†á¬=E] AGÛ!s”ê²D™n{ĞêEn?MVYgùÁûÀGÇ¾7[´o2˜!QÁ›7)R	Ñ™Šñ6Ç…³	‰üR81]zâà~ÁìµŞêäÉb²ÉxN«£y6«[<“ŒÂSê1 åÑú<úæB€Ï¿ë[p??8Ÿ_`‚KÖ,ÑFx×NkE¿/…ÿëÕ=gÎP±çYñÁPÎNÒ[“Š<×­ÍÊ®l\b2õ§[¢xÍVKÛ6îUú³
+H… c$ğÁX;´]Q›Ò(‰²‰•I—¢¼p‚ıï™!õ ½N$—øbŠ3CÎ|3ß‹Fğìåóë_ö¬¼g;&dŠİ^iqDÅÑğ6ÂE©{£¦ÕŒùû3^V[OˆŸ-ó¿›Fì(½­íùŸšÉÊ“¶[öìùÚ¨w†şµ‰Â$K%[E£Êû\|æ0‡ëaXw²„ö¸Ûq£E¹’ÖÛ¸b†ÁÇOC
+÷üØ¯ˆ‡M®µÒ	|	QCÃeŒZ	\Í½Phn:-AŠ&ô'[‘YGoe©´æ¥±§·èO”„Ác”b¿å:<næ€XewüáÖîÚ;ÂàÀ4pç(¯–“§ƒq6Dq¢”…8>IñÂğñ%wxœèşÔÀTÎãËÀáœ(!Ö>˜Bçj¡Ùfg?Àß›?·ô&ÂÏÔRsf8©}»¼\uQUaSş©Ö© bWÖ´´‰ÅB’ZnóÜ&AŞíb,ºdLékQŸŞnØæb>¥šôÃú¾ú·cMì»”Şi{
+«»¥ı*î‘Üp¹îŠ…¬ÖZ~çÇyùõ‘Œ6dÜK¡ßéŠF”¸a¹ZvúÀ	W§"F$÷UÏ;«˜½æ’kw^Lm&{ÇYÅ5š éIù(N¶™ì2¬‰£‘ü~=D–ÇØûÁº~º1ÃHœƒèÉÈÍIÂh8æãÏ±Ì¹‰GÙy´h65ÈÆ¤Ï8ùİÚƒÆ~3Ye«Ûå›é‚ï‰yÇ]2úOàÿÅ[ƒyC
+U¬Ñ5›3Zw.	¤§i†XñQİ}ı—=ŞÕÙ#ç™¦0¹€aZÉ%“Ñ¹|7(mXWvàe®ŞQÕĞ«ºn@c #ÇÀ«ÅÛ?VK ¨ÿ‘v oZnÊ×Ë»²äm[wÕ½ê•	Ño´#<2_.°Mş6¢Ÿ…ÜĞy¨h´b#‹\«€Š7—GP5nÃb•Ó¬rÓõ2ÌÓš	=Ğ¯e'üssªoıT_cÉÙ‰B5ŞÏülm	šÂÿqÏŸ¬¹ÂQ¾¥È¸4ğ -…ÙR=›IÄzPHnòÅê»8­û8¤ãD¼bR°ü:~‡Ù¢g‘kèß4Æö9ô½{6ÅÛ›b%¶TìT¶¨öñæ–f+¯ÏpËÑ‹E~wí÷'Gş¬½×UFó1—jbùÄĞR8Ã¨H1n<|Gı“È¥ı½K6 t¢wÙ^õC‚^£¶»„'tû°e¦…RìPc)¨µà²j-£Â`fß£®9¹—Ö€Â¢-DHwŠG¦Îê½":o_ vj'ˆşãWvˆöx+)JMU04¶`040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgX5M8Vxû2N£Ä«vÿNnK_Øgb 
+É9™©y%áÙ³&Ç.j½üêµºka²õûXˆ‚âÔ¢²Ô"şÕOÌ½Ü7U¤{:UıRMå:¼¼ç “+6¦x+)JMU045f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©4UšÏı`a°]^û"sãNó^IBU§•¥e‡üni–âyÖê×ìã\Û¨Î-aØ fj8Šx•[
+Ã ûí*Ü@ËÕhŒPJ·¢×“äQŒIéî+İAÎÇ†·e™ŠÔÊ^J¤òÑYÕRt¤!…– Ö]¢ÛT¯àÀ,^!c-’úŞ{]IÓA™„½©
+±±”÷&1iˆp”qËò3¬X‡yÚÇç‚oËC*g|£lÛZy%C$*­eÿ8"Ãğ‘ïßîÛ|"‰/ÇE;x+)JMU045f040031QrutñuÕËMax6÷ÑìM¯9{wk®+ºqèIOğD¨¢äœÌÔ¼½ô|†ªzäÔ77-^bÕ½­æ¥K—ULQQeAI~H~~N1Heÿ2ş'AÊ’ÿ#¹ÆÏŒ6ÔÓ\ UYœZT–ZR$?Yğ§™²İ­†¹ìÅu—Û¦/4Ë; R¬>	x•Îm
+!€á~{
+/P83~-Dt•QÇv!İ0ëüíúûÂoŞ[Û¦FãNsˆèÂ`	JÙ8ƒ\±Dd»øLÑV$Šà]ôêÅCúÔ@‰ŒOÕS€rA)Ì&@,äŠg5’ˆâÏ\÷¡eˆ¾Ê—»ôÇs{¯÷&—¼·›†`t–bĞgcQG=Î¦ücTİÇìÛõ½¾?Ëx+)JMU07b040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏg“j|;µNÉtAÎ½ÏÑéof?ŒYe	 8²xKjÄ0D³ö)´›•ÇİúYBÈr©Õ²Íø‡,/æö1@ÖYïQmË2U¡´|«…Y@ëm”É+HV[d£}ò"])QtnöPx½Ä³:EŒÆÛÄ’ŒAå0f£œ%:e•´¶¿<…@ì@F)*E¤¤Ï½Là$HDŒ×M8ë¸êsZmuß‹÷¿í³†å¼s:?öÚ+4ÎƒhA4ôóªòıæ‹ËÀ"–°Ò(nK˜Ö›Ø²kİG×SÏx¿fºç4Ï\ÚÈ|´ûç‰:*¯½nC	ûøj¾>:kûxÍX]oGí«÷WÜX*ZËi€"„U˜‚(4ÂP*Ñ>¬×ãxšõ¬;;eªü÷{gvv½v€Ò—F‚ìîÌÜïsîL‹rJ<úş›U–_e—Š–™6I¢—«Ò:J“^ºuªêã!·Û•+³·\¯Ê¶–U>[ì¾VYû½(ôÊé¼õi±ÌÚ¯63³ÖjµÈîığ?Ì—åe?$I^šÊÑ´(ó«‰ş¨è”N&É|mrª¶Ë¥rVçc#F§³ÌeôáveHWjŸMirŞ”Ö[”µ¥ĞßIOÏ©P&Å™¶Ôa­g•[[CFC‚u£1›§ı&/­U¹]¬ë’ŞMÒk‡ñôø”ÉÑkµy*!¢W¡
+RÙ€Û”`—×—DvÒËHõÁoß¤A£ø‰ õ”ˆšsH`Ä2»RÑov•cÅ"!nôÛ/o^ªíÄY•-Ó£C’}‚ĞY…yÉM7çÊ§cgoÌÅÿ9/_İ™wğÑİqı`˜wd VÚ	CZB¸»»Zá\İ¤F@*U\Á.å^©ªbˆ#ëı—º(”}¢TõÒà¿“î;v|LŸ“{÷)ş»/éqÑ_XmŠş¹²ŠtEnñšSŸîÒ®ò»Ôÿİ0„W
+øÁ¼tg+—+Œ‹õÃ'cÖşœ¾›nN^•»F³¼‰IÕô„™«-]„±XûCÕïrb˜‡FoT6K÷Á"‘¼G8Ñ9¡1dHAsJãà´Ñ3à®HûcæÇôíu_¤ÃÀ¹¸-Ô±>:Aı™Ë³Áâòâ+èVgÎ»p;ëàFŸ’¯qê6—¢e]Š«{.Õ|ƒZÏœzşêìémÄ?Ç‹îÃ5Â]ˆI3õ‡%wH ¯¼·Ú)ÏHG !/LÖËT=ˆlw­¬o÷µ»ìò ÕhZ–BôÿÁ±}ü×õÓ6iHĞ)†ïı²Ç¯Ïå÷Şêq`îKe.ÖÓ33È¯D°IúwxFı5‚ŒoC
+_ÖS „qòµ½dûİhá)"¹jb î²qô“2Êzyi²8ò¯ÁÒ[Õ†°øFãxaILa³>¤x0æşO„:Ó¸ÖõÇ¢SõZüĞ®3Ïm‘2šS£ñÓóç‚¯ñ9ºã•Dû9øoÑ|˜–Ó˜&9ãçõ¤ı4'½Œ©9n÷oŸ: B/§>XAdˆ\ëèÅ^› 7eåĞ‘hÜÚfpÚPGB®#_ïQiØêÅI	ît§gg/~Ÿ‡Ú·ŸRE¥dÂjóĞdçh^óu!{Âf(úa(ŒˆœœñCwñø˜¼sºĞÁÅa£+©Ò—†Ğ]ÈSÍT¡ñ¸¥rÏt6ğÜèGYÏeÈÓE¦m¿*ÛÃªë[¼oê+–ªÛÚPSa]@‡ô9ìq¨¤C¡áOJÙöl£Œ£-ùQ»×£™—²ìR˜‚,¡öî4†6|)>9’)äuÂ²ãŸ-N÷×™¥<tJõÁæ‰p5ZÕ
+¶}xüŠ¶2'ˆN`ÅÙäõI›¹<-IÎ·ø&õEÀøNÔ‰Ö068›ÆñNÔ3»Ä¯Ò°ÄLÆ/í{‡Ü¨¤t&irÖbMasi½±\¿½Éóı"s2$.¸ú2ãœê#ßœÊ×)\ĞBgà/’ÜºÏÒeDtaP§µdšgºP³£P†;›Ş—ëbFÛrM…¾R”.Ëú¸Xê¨“ñ#½˜SUÂNã”%\as‰±×nt…Ç•EáùÅ«Šz0ÜÉ‰T-WnKóÒRiõ¥6Y1À¨Œ­œJ£6a²¡J†8/a’gŞÜi–½çÍ;_û}a´İ¨ã.eÊ5$ÚTï‰ÃPV\ÊÀçe@§§äìºÃ™á†4Ë• ¿4GT{;A¸Kàğ.ËxÛ\h“U>üZÍHhÍL¥]7oà  ór¦†µírì„¶»ÄÌdMŸ}ø!¾ov.T<7Õ'-ˆ¤ÏeËIøá3N3†°Tş®!'nÉÍ?†Ïx•ÎÛ	1EQ¿SEPò~€ˆ­ÜÜœ8‚™‘L´~§7lX¼õşœÒh}šÁÃçªƒ‹ªDÜ¼K­¨æ
+5B¢d`Ä›Ö)«gÎÑúŠv¡ºfKÉ©²Î&š²–Ò‚>sÙ†Ä€¼âK+ÖÇë¹/÷oı&utÙø“‘gå”G=dÿ<béÄrb?`Û
+ñ=•Cx+)JMU0´4f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©¬še¹‚§èpÓ¼‹?}Ùn[ûôi×AU§æ¥è¥&—Ô)Ø·ëÒ‹+÷“×,»ığøëİîrsÁÕ•¥e‡üni–âyÖê×ìã\Û¨Î-aØ ÔäMlxIjÄ0D³ö)´ë•Ûš‡&„\ ‡øúú²E{B–}û˜@ ë,U¢p[–Ò˜Òò­U"æ²Cë¥´`’£òœ¤×DÈFXˆZZ®d·C¥µ1¯ò•q‡2ñì­¿”‚à¬ŠŞ;!H•)üöcNœĞh
+(R¶&p!¸ˆˆ³ÍÂ¸ ¢ÑIwp¶i«Ú³¬Ç¶ÎÚ9öş—>,çÒùÁ„ÓAqeœf=×œwøóªÑıî‹êH,VXqb·Êzc[fSkûñ†±´éŒ÷kfx–y¦ÚG¢£ßÏ8°¾ö¶öéÕ}ìzlºx+)JMU04¶`040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgMhâòš7/Ó°Ó¬ÏmÕR¿XÛˆ  PHÎÉLÍ+apÏ^˜59vQëåW¯Õ]“­÷ØÇB§•¥1ğ¯~bîå¾©"İÓ©ê—j*×áå=ÿ 3^5GPACK      •xœ¥ÌAn1@Ñ}Ná€âØ3H¨*vìªÀ$Œ`4dîßVêØ}ıÅë«`¹!ÉŞp*©P ’hº0ªÍ¤Ğ=uµÚa…% 1¨˜¼B²X¤D&N±D³Hètë·¶Â¹]µÂ±ßçújú_ù¼.:?ö©-€Â1pd‚gïİï]æŞíÂ}?³vËp<}Ao°næ
+©mõÏ]Z6÷-Oµœxœ¥ŒKnÄ ÷>»Y9FQ”ì“Ct7Æ?a¼˜ÛÇ‘’d÷ôTUµ0gQ2¡“&pLÖ1C?DˆˆŞ;Ÿ%«c³CáµŠ8 G­h²JI*¨`•w)†(½ÿx¨ÉbL@"iB9)­¥Ôş
+4pÖi+âsaõ‘×c[Å+ü®Ù8÷>.çÚ–7¡œ	½QÒÑJ#es½K®•ÿ‘h¾¸Œ,°ÀJ“¸]äz[S­ûqïº1×éÄ¹{äyæÒ"óÑî'Î™:*Ï½nc}z6ß‚ÍmÕ•xœ¥AN! ï¼¢? ˜cÜ»G?Ğt7+qa6€‰û{çà¼UêP©ÙUC²Ê	­*9 ò¶§¸lB’Ò¾ã‘sXÅÜ©k› ÈeŒ‰VŸÂ²¸Ì™
+†×5l‰²3ô=?ïÇ•\æWiãhğBtóˆo×JåöÌG}‡>.ŞF»Á“õÖšÓÖ2§ş#a."*ğ¡cÈçŒ²jãQ«Î^´q¿?f9Ë¹ü˜_BXC“xœ¥Ì1Â0@Ñ=§ğ@vÒ:©„İ¹„“8¥¢mPî7`ûzÃo»*„äØ'â¨`)b@H9ö4$äEJb5/Ùuk@.:äXØy*>e«Y=…ìúÌÂ¶D²NÕÈ»=ê÷:Éc{ÎÛQ7¸È¯–ÎûÛ´Ê¼œS]¯@¾l‡ÖY8a‡h¾ºÎ­é3æ¬4åC éÑÌ×5IËšxœËAÂ @Ñ=§˜h`h¡$Æoà”¤-µ.z{õ
+î~^òee†0$Û!iËÎôèÈS‰©pvÙG]Æ4pÉ}P­<­v±8ëMñ)#g"íÍmŸ9,Ñ eV´Ë«­ğØë,u†;cƒË»Ä_h¼='ªã9µé
+Æw;&ÀIwZ«¯NU„ÿÜÕvLÖc‘Â›¨ã«GÛ–xœ‹]jÃ0ßuŠ½@‹~Ö¶%”Ş GXYßÆ"¶ÜÒÛ'¹BŞ†a¦ [ò ïBŒ…]bÕY9ê¤ìeÌœ’Ål~å@ëäY=J€$2oÇ¬ÉåTJZ5rëË~ĞùV[¯~°®;}ıi~õß—Mêú9ïÛ‰ÜÄÉ‡1ºH–­5O»ÕŞñænJU­ åÙnÒèŠÂ}^¤]`ªLªxœ¥Ì1Â0@Ñ=§È@NìÆ„ØØ8§PATÂıaàl_oømÉÙªÆ’ƒ#PÏ~ôI#ª¯%íX:@ó”%—f‘( Çz¤Î…ôÑCN:tâ…¼Û­.ö\¯Rì¾İ§òªÅnäWbŞ]g™ëTç­uLÑc tv`¾:O­å?FkÉöt8^öæ¡F8Ÿxœ¥ÌÍ!@á;ULšÀ ‰1z·	–Ÿ•¸@Âı»‰vàíå>9¦à)ºBÆçˆe–“#*EÉˆ””\²o~	±†w~Õ¾—ğ«M[{[[¨Û9viµGçPZ8,Šã¶Êœÿ D©sgøJâ|.;‡¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgàÛ&lg÷u’Ìä»›W¸5øo+Ù2 Z	H¾xœSVH.ª,(ÉO/J,È¨äRFå §w
+óº>xœÍS±NÃ0ã¯829RU: ¶ ¤ƒë\«‰.nQ@ıwl—Ğ4¦Øçw÷Ş½»TB®Å
+¡J3¦ÊÊÎ¢XRSYs.°·¼²s­sqy5ò¬´1K“F×–…‘ë¹zCÃÅˆ±l£%ÔMY¢%%g:¤óTXOÏËÆâ ÖØ|àm‰%ğÎ"•Aš;Tgã{‹í†4hUÀ	Î|ZÆã;-Jª×',Ú±Hª*G
+õáz®Çá¾NB4p°h+p/ÓéAi›<l»8À7å|h5õ^!Ûõı˜â‰JÿÚ˜1¦mç48v¢ãPÖqH
+‹·÷7“ŸweÿõİºÕôšıŠzÑ|¿œş2’€.HYä½)ù‡ù¦äÎ¨ä‹}‹¤²æ;»«“J–ÆÔrf/Qğ®¤ÀyæUî‡Ï"?ÔGRÚº¡.rakX“BÙ@†Ea #…:­cŸü¦KDê5xœRÁNÛ@=p@Ş_€ÄÓE¶@¢¤TŠJÔC%ˆ°
+”ÃÆ'«Úëh¼ròpñ½ôÒâ+Ø];ÁJ9uO³3ofŞ{»¯»÷.{ÌëÅT-u
+,:7Œg…èŞÓT.µŒ;©E&ºWjöçä~§C·˜3úrm°]CfßµLåO©æ-PçPÈ¹3VH2©`†©4aybÒ0Eğ+–”*†˜Phü†Õ¸’¸üÈIÆ$WM¥Ó`\NS›Œ¿˜·ì ÎĞt~E…ÔTøZ~0>9ıÄı>XµÁŠ’Ï<™¸ÖÃ(Y§vª—d:å”ğ^”g¨VÛ*w”ÛPêÌ›¶$ ebEõÌĞÆ<B]’‚.Ç÷¸Â}f Îç·ø@~†E!æøü¸_¯0ŒP,„‘Def•µ³½0“Ñša`·gæ‰Bo9™uÃèâ˜wÜhöÁõûï6í–líØ6ÏÊ—åtÃvı2²p;™VûVZû0Ísgò¨hØÜ´®'Á°hI»]ÎÓ*¸Ÿ|qä—ß;Ÿß bëôæ2‚@xœ…RËJÃ@EªÂÌÂ•("È4 L¤Ft!¸(¶UÑ… ;u‘ÇâT'™‚HÉÎµÅ/Áñü—Î+»q—{çœsï97Ÿ?‹¯+óÁS™3YZŸ¹›l^Í!'Ş¾¿D­",$·ÀÎEĞeÑ9OF§ğD]B7 Œî<Õğs½±¤I(.yÆ(|dÿ€˜·İ=êbôĞ`çê]½#`ÀÍå>‹¼·¯ÙÕC¹‹7ğs?¥NŸó!ß'ë#G3¥ÖXÊ•#•P­]¯Bİ·í¹å¢,ñãÒ×„rZKL¹è4É´g—\İ¨ä”ÓLU~kô{Çj@asÁ(‰5¬}@X’*2úÇ"FR[pFÌ”Ê€Úç²œê°ƒa`Ô!ê[6s¿¢y@Œ|¹TxSM1ş´¾‰Ë"lvª™k(åˆŠR48Õzåä’£ÃiëßÑë?
+H5ÕBM¡£ø>Wç`yLA÷ä¬ß#*íkæ¨Ø¤Ô¸5¼aY‹TƒÛıñİ:m-é£­­:Z™ö/çÃ]ê'‚xœ…’OKÃ0ÆaÒœ=íôšSË†£-ˆ¼¡ÿ\ÔƒmßmÑ6JaH?Â~ÁƒßÊ«M[mmq’Àç—7ùÜzë¿|ôr…Rê,C%Xl;`æ’Xcj‚RŞÌÆû@C–¦(Dr³¹”X£t†ëùÍò=bM3µs,WS›¡@`Ô!«œÇS@;m ôŠS‡X‘6p)‹K€Ëë¢´[R‡R…¨KD¶,8Ü»Î£…;¹o#¶Ø<ŸXw¨}a"~Û—n&y,ôƒÂä;j(D!”?½:¬vM9„ÒÑTy^møùúë×îM#Ê>_>³»ÙNÓ’ÿÃ:¨Æ¤ß•¶ñNÖãÕ)âuj¼×÷Şrs»ó¡Hñ'ó3snÊ'òİnËÙá<7xœ…RÁŠAeVYwfDA½Xqé‘àAVÌADdaõĞÛS“4™éº{Yò^„ùÁ‹Ş$¿Äÿ±&³ÙMÅÛL×{õªŞ«_~ÃöóøÄ«÷îW½ÃÓ£‹¢À¿•0eî0~Å‡^2>Eöşãyé°)*S!Š–Ÿ=Ï{ãÿĞ[ı¢¨ú¶#–Á­ïa’¹ÎĞHåRÅjàË—Ä²ÑÒ¿ınw÷ŠØòj|âçÅy*Å,k…£ÜÈwH¿áºPİİ?¬~Ü¹·<Ù½ER(+ş)ZÇ"øø×¬6lõ›÷!—dCà[Ú	İ[´–±F„gîÀM&˜¦’+ç0$«¬+î
+C›’5²~a9lH5V°­QÕİ{°ØÜ?­[AÂeŠq+\ÅáoÎt‘ÆPêR9Ep2Ë¤\Ö(@ÖH¼€×	XMƒ)‡†æ®‡Ô„3sié376ÕN­u%ÄÂÁŠÂ0Ë]	‰6 KÅÓ¨5tÆ(œ¯²hã¦ÃHpE“]—	/“Mx‹ü)…Ãèşjµ;ñfhh?v•×?ülÃUôûàLuæÛö
+!ˆ)è†;©UÖúÒ‚ĞÆ p+ïSû—&§dõ¥Ç0ç¶I@bR‘,WVº›Ñ%,¼ÔèÁSûA…í:¬ƒùƒêëÁ ôéøİ¨Ì2$GE}‰İ.ñ¤¹á ¸ş IÙAÂáƒ-xœ»ªĞ©4Áœ-9³ #µh¢Îv6…¼ü¼äÉ¹e'Ç0ù±&åä'gOŞÀ$;9“ÑZ)¹¤HÁÊV¢ZÏ/µÜ9$H¬¢-UsòBF=ş’"½ÿ ïÔÊà’¢ÔÄÜÉw³q™+£ÊÅIØT®É§™Ì0Œåc–Ÿ¬Ç1¹Œù;'XåäŒ¢ÒÅ•¹@Ešš\œE‰y)zA©‰)0sjYìÙ¡¦N¾È+:y«"“¾şäı¬“¹Yk9®g7Ş¼—u p‘_¦¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgXï¸ı[ásƒ9{_ÍÖîŠÌ:hòWÿ ~ww¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgx«U—om²™ãÄ7NÙı²Ó7”ÿá; bšgå†xœ»ª°\jC&£DYb‘Bj^rQeAIjŠKbI¢BtlReIêæ3ŒŒÙ”TLÙÉÿ˜‚7‹³Érq¦&§'†¤—Lv Gßq¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏg˜æó|µô®ò…/)¶2]Xáà¸ n¾ğ¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgğÜX×ÉYœÖp$·Ç¸œKëòÛ}Æ ^‡ó¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgxáw¥ëšLÆ|¡Ôÿåµ—‰Ş,s0 qq¨xœ340031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Ê3„(J**ÍĞKÏgH}|ÏªÃ¸é˜˜ó-éay|&úÛ kM=.À“-‚Ğ­QÒX <N<Õ61GÿtOc                                                                                                                                                                                                                                              	   	   	   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ©leÀ@ÖR[üØfÿ!Àm!¾¶>>ş’“İ³¨F€O¶t´›³¿cq÷Í.Ú q5Ö¦/±#îÂ¯YÎ¿¬:Ü0–Ëï0„¡e{'7ĞáÏ2?Ã‹Aª3úÓ¤!!îR&·¨rzaĞt©Õ1$òFåÓêZ]êåã kùİï0Ûsî!8A”ÿÏH÷ôíkIìI±~‰	siV€ÄmŒ3w
+*Óí¾3Lç… ÊHfPĞÉ˜˜ÀyneãŞ:ˆ3‚ÆCÚàVnĞ‘O?ftrDQ¡Àâ¨,é÷ùCLŸé1u°ì·ßWìh¹&ÚÛ¸‡|õ=Œ6|Œ±°€8kQœªün–E\ç«ºw¡è¢!…rĞ¨@A±˜ÃB >aRjzûÏím{m,ıY¯A·öqç0œ½ê›+ŠYjÁ4ı/ğÑú–Áy‡/,Ù=*-´ÍW¥Ó4F=arH4Qhq¨’Êµ¢¤7ÖºGÊÖ3š<QJQ‡ı];İZy¼,äµ5ıÏ¡}u™3VºñèNÔŠÖhŸe¸ÿ+¦Ùv@7í*~o;4³Èö	¿—°wüÆ?\ëWŠÈIiÆì5ëO±à2oøŠ«¬»OY5—r®•ELäa2jŒÍ œ‡t-…^[˜òm7ˆ”ÆıÎ€X—)š£Ÿ–¥õfe%{¼ş•×"Î§Zßœïfß6£  ¸    Ÿ  ş  e     G    	  µ  Ñ   ½  Û  +  
+¬  É  ã  h  ç  ¤  ^  P  {.À“-‚Ğ­QÒX <N<Õ61GÚX—I
+kïí-6ÂU*{†÷x+)JMU04¶`040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgÈşÄù®íd„—ùš­û¦/Ü2eÎúœÅ&@ œ“™šWÂà½0krì¢ÖË¯^«»&[ï±…((N-*K-bà_ıÄÜË}SEº§SÕ/ÕT®ÃË{ş [v9'xuSMoÛ0İÕú¬ON›%Ë:ì ‡"	°k=$½A¡Èt"Ä–I.–ıï£>âØzŠC=’|»Fï`6»şò¡ãâÈ÷-—Š1ÙvÚ8(X6æ»¾–:gY.Ì©szj¸ªüßºuôC€Fïã‡ÂÑ6g#Æ„VÖÁÛÃFşF¸ëÏ)¦´˜‚³¯ŒÕ½`QUEÅ‡ÇíîäpG<¥ï18‚?¾éJ6Ğ¢µÄ›e¡"Ìoh‚#&ìTXæiOÖÈ«"@)"dw@3†'ŸfOm‹ÎH‘*"ÁR‚ïûíîvî€“şrcà]GÔÁée™ŸÙW¹CŸTœ»y:ìÜœv“‡gŸ9™L<d:½…ãlNë÷ÓdÈ‹½¨xØæÖWqPxãùêg4`µ8¢óÍÊeI]oÔy’—¤Añœ8ê1jªpù_µvZ7I«oDßĞ@ªJ
+´~S¶¡/ğ2[–›²^zåig^³8À>B1Ø'ñ÷®!ñBJ˜ëŸ”°‹£vtĞwç^a%^š şã'˜ÃĞ~ûF¹ø<<a¾%Á¢$¯eŞĞ-õ•5\Ğze}
+âû¦ãp	ÁRa1´òÅr³‚Ey¿Z<|/ïY–ÑUM~©\£Š|µ^—ë9ÜE“û|Ø!*àCƒT=!÷àÈÛ¶•ÖJ­.rZÎk•"_4Úz£BáB6	 ¤tÍKDJg‘æg8‡%†C{çü=oÔ%]£)Xv™Ü=8ØÊ™ÙË_¼h@xUmÛDæ«ı+¹ùèµè¤|¸rEW•–èÒ
+Ehc“Õ9ëh½¹C÷ßyf7v^(")‰=;/ÏÌ<3;­›)]<ÿæåK]ÜëÓB›¦f±lœ'•&ÙtU™&ÃCá6KßœsQÎå•mÑ”ÆÎÎ§Æj·QµğòW73ù³ŞZï ÕŠÄ›gé MÏÏéıÊÙ–æÚ–í\ß3U®Y¤ÕÊäÂÙmw¢ŠÆZ‚»ü;<è×ß¦Ïôgš&uÉ®F`æïy}DÁ‘’–İ»±3Úó[Şi+YMkS@ Æ3¶ãÕôÚ–¢™K€|Ï\RifÆëšZ3³ ™jĞêù†àÛT›­Ï––½WcéÆT•aºåº^h›&\ÜL®%Ââãj*Á$ µqˆœô†ô»(È;BöÆG	ä¯PVóƒvPä«1úÉVÆúç—4Ú>¨š­ú'{zFá¸Ës ÁåKü\P,`h•Š†ƒØşü•™½¶¥Ñ6¯üÇU	Ô{	DI%â‹Òd'‘.ËM<W½üo}Û¥}’qŸÔI±ºşä?ÿ·0½İ/;»4Á\äè»õµUÙ„Q&;#c7 •ãvÙØ–imüœnn	L3é>pµƒ=$LƒÔ­;K3TSF#ÿÉÏ»R	dÔòIÍ¼T/¾ÂªÏø!­ù¬®1Oà6,#D~Î; ~®}µaëê-`GˆÆw<ŒT5èç-åàîô:ğR8#!&\xÓØ˜Jdì$ƒC;Ì†-{&_|}©2Ö½cudĞ’¬M¬¿‘55D’`åßkŒ¯‚[D{‚
+1™k‡ô
+»†®_O1yA¼•8öB|9Ú³±ß+ş°Ïû!®2Xì9’¸ä¤)Ğ…(KX$Úö‘øƒi=&8óÅ³«oÑZ¡Á)‰Â‹„ˆ¥°ì;_B©>hmóë¢à¥—ÅtJ”4YpÛâ&é]|v3çwÂ‰p5¨³Oö,zw…ÚzĞhD™¬Ïæ“ÍB;*ü&Ny”,üÜ1fHov7Šf[æÃ»ò'â3'ŞÌlƒ½.™Gšö†‘1Âq¹nşwnÕû×ü vØ¦“r„•ğú3ı9æ?”ğíËX©ì]l.ä‚Í—ª±1]¤–×¦\IñRÏ?4—KvJe†Ë(ÙßMqÍ«='Ï(CSEï	´ÿ_ÙÀ½x+)JMU045f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©r²ønÛó¶=5[8=ùUâ,ıÕÒIP•Å©Ee©E EÙ!¿[š¥xµú5û8×6ªsKv •¦9hxÍXmoÛ6ŞWëW0VÈa7éÙ‚!iÜ&Èò‚8m7dÅ Ë”ÍF¦<½Äp‹ü÷=w¤(YNÒ.û² ­%ñxï÷Ü‘£8‰W;¯úa„7ÁDŠY ´ç©Ù<Isá{­ö¨ˆTÒ¦‡e.3zÓå<OúÁÊ[¨æS™Ö–e8®¾fAı=Õ<WaíÓtÔ_Ó@k«Ù4Ø~µC¤“±Ò“şHé ]Ò§h–ÓOœLÚ^ÇóÂDg¹ÅIx3T_¤Ø/·=/*t(‚ñø*¹€±2÷ÇYnÄõ'²®+²4< 3í‡ı_½ÖmŠÌÎ#CQ(oí€µyğc©ır{§ãµˆVìîÁ¡7Ò/ùocÁhİ;P“«@÷.Šü=3ói”¨¤€¼RrOó¹ÔãJoCÛëõ¾Mg3´ı>Ö»H!5Ö~>;Û†[W˜H‹<”2oƒ{*ó"ÕÂ)ãİy^¿/.e0ÎD&Ã\%Z$‘İ!:a¶ôŒÛSÙydİOßd*s†õˆ•Lk7.<ì¶û}‰`køì/Z6™ÅÈ'gã÷j‘<L`œme\¿ø„€Ò0mÈ¿Ş*×À¯
+ïZ4k¡tº;šÔifé€¬mEI*òâgüş"N‰^77)	[a‘¦RçÄça›l´XØµ"µkÛ¼BWÆÓÄˆ	)¢\!Ùr6“yªÂæJ÷ÇA¸
+¹‘K÷¬JW*.Éeš&$ÔU‘ ²ÀØ€c]A’)6¥´Š»‚Òq@Û"¿}Œò†‘a.Hù†ğ±¤í]öä#ÀOïL.Ş0î°–G«®ì¯„€ÊÈó©TÉ!aÎ\Œ1ã«KßJd;)@@Â>9>$—4ÃH¦’¯ˆ%Øõ~?¿<‘Ëa´œù+[»‚éÀÑê×X…zëá8”&+´.ÿç¸|§wÇÆÀG¼»bú½n^á\©ÌU¡hRÕÜğÏ‡eøœÅ€7„éTf5HD½}¢âX¦Rf'ÿm5ßÑ‹ ¿­í—ÂıC?j9FÒÉT
+•‰|Šl$íŠ¶Ø$l­	ßí?5•Ã Å
+å}LwñWH)]QÉH@ÖXí,´.^½-¶N©¡×4tj½²‰A¡Î™[Sö÷e¿H¡æÍ@ì¯õ¤«ä5ÀqÆu	X‘®°|S5®ß{‹º‹ıö€0dWüx‹f*(Bµ]kwW»üh8ğ§'UÍZ;ˆ‡õ¿Ë 9l–«£\³É{ŠQeÓì^“ÜêšI%ü#İ‚\î¿yøk=º…‘r„F7MßLiôÈ±C håcªĞ˜GÃbæª;íneª¢åºô<˜Üu1Júÿ ë>ø»@şÔUê
+È¬#\`µ*™4Î,*dœ1fJœÙÔ*k> àå;üaw FÓ çŠŸÊ8^ŠQŠês T'3Aã®¢a«ÜîïXÿRv¿9Ú?{7§ƒáp¿WçâÃùñ¡8>»¼»<¾úƒh[L!ÛşÑ¶'ÕB±&š´³
+ oúk}ƒ³Cş][íÛIc"õE1Ú×cL¢·'r	¸õŸÓ¹FÓ[d!¾u…ıRŒ wøÀŒyæ–¡ÏPã`@ÃŞ¼¶‹0‰É„½wRËÔğó2aØ|Báµæ¥"Ä¾’ˆ)Ş*Mœ«õ®p]²Ã~p·ïÖšÖb›3ª\sê…hÀßajµ«7xsxT	xŠÍÎ#ÄéOÎ¿B]˜69JFPcFÏÅä¤õ0{­€z—#7om@ÇKFÆY–¥õ\mkhPª 3yå¾-N¹®¨«AaCsÙàîÓ3€à„ZRÃSp¥}¿İ?şmp(ÈÕ¦?ß	g’GĞ:P‹0DıGEÌ´–˜<ŠvÜ,ª°îÓCs±ß§-ïs«/hV–‡¶LM4ÀLcØ‰—t<lòhMÇCEG@3ú´AØ.•–Õ˜kåHŸÊtggTéæ2É²zåAù{\¯]ñ­R¬Ÿ
+†	%S2tóX +ñ¨ò)¥7-Á<SdŸ=5T¥…T|V)ZYğ½åJõ‰bÃ-%¾¨™v‡=Q¿ K{ÂvIt?òD‰èØÊ‰d×»ŸÃ™Şjxt-ö‡g[u 3(ó;í¯ÁÛîJÖäÁ3¢d×5³RulûÖjÓû—FØ~bâ7x6 JX•éæ¡Ök™²–*f5epçæèÒş[–ïöÇz‹ÅeKË6âM¡p£C´mô…ƒ[¶ÛóVXÒd»>º§»”aÉYDŠåxÃ¦á
+ÑÇ¤ˆÇb™"V7’nZf¸ÑŠ–<‰e0~Ç‘Èp¬Çe	îØ s‚cBºPç)ğÄ,öH”“ƒa˜wør6Ï—‚Š=IÕWfqGR>j¹8mŒ0ÄaÖ<«–åÕ;²Ûm¸!»+">¶ÃaUÖ™ŞµiÕ8²p˜¸tÄŞÈÓ¢¡ìá
+C“9W~¢7DiÎPöú€«ê˜%AfÜ¯äW.èLñ­.œ?qr°2p¾È ÜĞ¶n(»§B@q¾w¡›Wî¤øĞ¢q³v%¨oUí–»ebm*ıÊ4•¾dæJö¯˜¦v]ŠØ?¾µHó„NDiºÕ÷ş¤&Õx+)JMU0´4f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©¬še¹‚§èpÓ¼‹?}Ùn[ûôi×AU§æ¥è¥&—ÔÉÏ-¼«q+ÕFŸï÷šéQñÌrpuEe©E EÙ!¿[š¥xµú5û8×6ªsKv ®êGHxRÁJ1õš|Å˜‹Y,k/‚zğ"
+*Rê!İÎ¶Át²dS‹JÿİÉ®mm,²É¾yóŞ›:?„“ãî^eŠ3F˜KRÚiåC-…ÎJë”Ó˜çÇé lnu–Æµ’™”åŒ
+gÎê‰yAÁ‡”‹¯Ÿ‰¼y:€!@¯Ì”_Ú:"i‹Ju@õNºİ®Ê¤°eƒÚg”uÌ$·ÏÏL4Ns9#R°°ü†eDÇ-kOĞ˜XrÖMå§EUÔ;v‘bŠuÍ	­t7Áä×8 aĞ‰?ËÓå¶	E<ÑAËŞ¦¤¿2è÷A£sş‰TãjÃÂÙh³ïÉEœD˜›7˜,3MÁˆ9s€®Æ†ïè.ÆäBR…E´VE)4NÍ‡4ño_‚›ğ|şôÆ°Ííä«’Ê_6`{ÄK°nQjuÕ
+X }ÅQ—jKgÊp¾Dò¶€:¿ó÷UÅóÔÛ©$Å™?Q?>ßøøFrŠš1nÁ+ÿ	Z:{xÍXmoÛ6ŞWëW\¬WÃYÚ­(ƒÛ¸MĞ%â´İĞõ-Ó1™ò$*†;ä¿ï9’¢$ÛéúòeKäñŞï¹£'i6¡_üüÃR$7âZÒB(Ej±ÌrCqÔéNÖF]<$ùzi²}ÑzKÔr.óÆ¶L¦óök!šïiª–F%¥ùB4_s¡§İb.ıú„fÃ_ivİzQ”dº04I³äf¬>I:¢ƒ'Q4+uBÅz±&WÉH[¥ã©0‚Ş`Sút#×áYg:‘ş­GqE"ó<Ë{ôOÔQ3J¥q¦G{GqØëäÒ”¹&­Ò>A»ÁˆÍâî©N²<—‰±²
+h×íE»¨cµíØÓáÁ“ƒs¹zn]hEXy¼QàÊ
+Ü'TN^Ü³¼£Nb,WËøê2ö­pZG:Èé1»J,Äv³©ì+f	vƒ?^_¾’ë±É¥XÄ­£}²tàè°±õ¢»ÍpKmˆÅÿ9._èİ©3ğ3Şm™¾ÓÍ-È•fÀïîMª†»Q®f\U@l³¸€^ÒœÉ¢àGÔ»¯TšÊü™”Å+›ï¨´ı}Úø<zLáïñ£¨ÃI‘+mô'2—¤
+2s€ˆ“tH]zHmá©û—ær°¸’*”ôq…·H9]QÉH@«±zòl¥uùôãäÍdup–µ5j9£²é#W“»eÆl]ÙïÊ~'Ã84¸”bo÷d¨ä-À	ÆY¸±ŠôÉóaLÙ¨q`Úàê.»#ÆCúñ¶k¹C”bqŸ«C~l8ğ§¯ëšõ÷ïÿA÷s¼Y®²rn°)ú£î3)h¶Ó¤°»eR…7ÈuaäÉÙğù}Àßó	Ç ‹îÃ9Â]ˆA3v‡mì Şy—+#6"¾yc\.b@u/ İ­ÌÕl½-İˆëP×£I–Y ÿ=¬î£¿KäOS¥>Af­ã‚U«–y+òÊÇTØŒ‰:¼6ÅÜ+ëjl†õ#€‘Õ\[ñs™¦kšä™¦¨NËäˆÑğUîÏ÷¼9»ŸŸÏ_èl4ñ}õšŞ¾>=¦Óó«ÑËËÓ«?™æsbË9dûíãÓÅ–hÖÎ+€¼ÙßúXèÛï­İ}ßÚ®¥¾('C=
+Ş© ·ñO<1,Ş"±Ö'¿RN wX°œ”ù­…>G'Fª-§#˜–pğRj™;~q@&™ãÈW£IgY)Âìk‰Xâ„&Á‡õ~ŸÂÁì°l{Kö6­Å±`Tµš…èÀ?`j}j0z~|Rø›ƒ9NHĞŸ…ºpmr’M. š?—<²“¶Ãu÷®@îŞ>w /›8gy–Şs£} A¥Ì´;»åúÔTƒÃ†tØ³İgà !õ¤MÁVû~1<ı}tLìj×ŸïH¦…´#h¨Çe’ şgeji÷<1{Ãf¡põ€åxÈ››ûû|äQ©ú„få	MF…ºÖ„öK®€i*S…Ç5e3,Óp4æÁÚÍú^§¡òªü
+±U¼Tå·µ¾Î¯rÈ5K¨f¯+ƒ[ }ú¯ÚcWÙ‰hœá2gËVRZñ¨Ìœó‰«™·DUl’¿&Ôµ„Ü{P+Z[ğ¥õÉŒ™­¼·T€ê°qçõ‡› ‘o‹hwì‰
+Â1¡U#ÈŞ~@Òú`Ã£ch1Ÿ4‘ËÁBŸìùŞ„ã¡F]pı#ª@öC÷r6€ªºl»Ë}¥¾¸„xk;º5 Jx•­¨º¹ZÊIê˜5PÓ¢¹MBºÂ[£ù»fOUB#»ˆ7‡Rà¾‰¬ï!¸UŸñM®Å’GÙí*:ÕÈÓŠ3Í„JåtÏ§a‹è]V¦SZg%¥êFªt‘M1èØîï$VÁøNgTdĞS‰aƒ>e¸ä+Uàq™@Üæ€E9˜~í‰X.–fM³,§,W×J‹´‡»H9µ\ù	¤šY˜Ã8Ö<¨·åõ;ßª»]‹h-!»k"{O‡Ãê¬s=±¿ûbÓÀÅ¥GGGdòr3­‡kĞÌ–¶ò3½G•¸4ùß¬ãwà.ó¸ªïU´…s¿’SRR….”ÙŒ0ÈËÀ…¢ RCÛfº¡ì¾cöá_Š\ßäÉ²qãÄ¯¡­"qáÌÆèÉ?i„€³]­toˆß®&´ëP™›ÌŞ*ï¢»¦´	…xPOKÃ0÷š|Š˜ËR¡‚<ˆ ;¨ÈtxØ<¤Ùk	¦II3‡H¿»/ÙæD<xz	üş×Ö×ì¢<?é•~S-°NG©éz"”ğzÓÏñÑt1ëÛtäßƒqíÀiAi³q:óEÁ>)±nÊ V]1Ë;3Dp‚Gİó)ãÕeY–¼ Ä4uŠ(c ƒ¼UQYtDŒ” ·|D§hQa§„¶Ì;–sŞ,f³¤¥½;šZ'¯µ†>Š»øt0¸Åwü<|€íÔ‚H6…LŸ§\_LVn‚?Êünƒ ìs,Ô~¿³csĞ`Şa]á>»]Å>Iˆƒí‰“î‡—Ï~Ñ÷˜é€D`Š'_‚‰ –¯õÔ3ÆW'Á‘ôA¶˜ûxAÂ09çù ÈNÜHÁSLìŠ
+Ú¢6åı´œ8s\­f4eìû®úaW'3oGã”ERL 2§ÚL"@H¸¾ªM ÷’É†D³Cº1$i8°$T`’Ü´Y5BsD'K½“—úè†yÄìO¿ëR¥_¦ËÙ#S‘× ¿på[Yí_Ş]UMılÓ{sêË³Ûòg«ËË} Ñ	NxÍXmoÛ6ŞWëW\¬WÃAÚ5(CÚ¸MĞ%â´İĞõƒ,Ó1™òôÃ-òß÷Ü‘¢$ÛÉÚîË$–Èã½ßsG“tL¿>¶ÿÓ"Šo¢kEóH› ĞóEšîxU¨¼‹‡8[-Št7j½Åz1SYc[Å“Yû5šïI¢…K³yÔ|Í"3iìæ³èÉ³}^˜ÎşJÒënĞ‚85yAã$oFú‹¢CÚÛ‚iibÊWó¹*2(N¢"¢ŸØ”>İ¨•6©‰•{ëQX‘¨,K³}:zJ‰2!Îôhç°!{LefÈè¤OĞn0äcÓ°{jâ4ËT\ˆ¬Úu{Aç.èˆ¶}{:8$xrp®–/Å…"Bäñ.D++pŸPYyaOx¸®6"Âøê2tÅN8­£¬GÔä˜]%æÑòv³©ì+f	vƒ?Ş^¾Q«Q‘©h¶öIèÀÑ9amêwëá8V6-Z‹ÿs\¾Ñ»kàŞm™¾ÕÍ-È•fÀçîuª†»Q®Å¨ª€P²8‡^ª8SyÎ%¨wßè$QÙ¥ò7ÿöÖßQi»»´öÙ{ò”üßÓ'A‡“ş"Ó¦@ÒŸ¨L‘Î©˜D¬¤êÒcjLİ¿—ƒàJ¢Q~ĞÇ^Ø"åtE%#Ec½ÿbiLùüóøİx¹w–¶5ôjYƒ²é#W“»0c¶¶ì·e¿Èa\ªhnó¤¯äÀñÆ	Üˆ"}r|SÖj˜6x…ºKÂî1ä€~¾í
+w(‚2B,îsµÏ5§şÌu]³Nãâáüï3è^c×ËÕSVÎõ6?bÔ}&yÍ¶šäw7Lªğ¹êäìèå}Àßs	Ç ‹îÃ9Â]ˆA3´‡%v ï|Èt¡,6"®ycTÎC@uÏ£İ­Êôtµ)½ˆ®·@]Æi*@ÿôİ‡—ÈŸ¦J}‚ÌZ1ÆQ«–ye•)—Œ	:¼6‹ò™SÖ.ÔØëçG #ËYTHÅÏT’¬hœ¥†>G @u
+“CjDÃU¹;ßsşåì~yrtşzHgÃÑèßWoéıÛÓc:=¿¾¾<½ú“i[Î ÛıƒhŸF(6D³vNäÍîÆG ox~,ß»»®µ]+sQÌ(x¤Ü†¿ğÄ°x‹,ÄZŸÜJ9ÜaA 9.³[>K'Dª-§#˜B8x­ŒÊ,¿Ğ#“Êpä»Ñ¤³¨aöµÄ,±
+BïÃz¿Oş OvØ?’Şú½ukqÌUíù…f!Zğ÷˜ZŸ_ŸÔ~Äfoâõgç_¡.l›§ã¨&1ãçrŒGvÒf˜ƒNÄ½Ë“Û·‡ ã¥cë,ÇÒy®q´4¨T€™²³íˆW®OM58lH‡é>^¨#µì$[íûÕÑéïÃcbWÛş|G*É•Œ M •qŒúŸ–‰Ğî8bö(†õBáêËÑ?¬oîîò‘w…Nô4+GX¤”ëkCh¿d˜&*Ñx\Q:¥Èe¡ŒÖÓ4£c= }ìèoÑa»ˆtVUcm”#/Ué.Î¨ÓÍg ’dÍÊƒ¹½.¤^ûôo¥È“i”âR2cC—Ê´VâQ3N/.nŞ‚y¶8Ø>wk¨K©ø¨V´¶à[Ë•2)Ä5·Tøj¡rëmˆ{CX:$×%ÑıØ¢c`«&:}<ø„ÎÍŞšGGĞâht¾×2‹}’óøñÇ}ÉÚœ`8ğFTìûffm ;]5İvÓûN#\?±	ñ^¼ %œÊ"ªîµBYK³ˆ
+¸Ë¨âÓşÛ˜Ô?4[¬LQ¨.âÍ¡ŒpıÄ…Ö5
+Üªí¸×bÉ“ífÇğäiÅ™¦‘NÔdÇ¥a‹èCZ&Z¥%%úFŠvN0÷È0`%VÁøN§”§ĞÓ
+³î	}JqMÈ–:Çã"ØÍ‹òr0Ë‰PÍÅŠ¸ØÓL_k%=\-@ÊùhÔòÌ$ÕÃFqd`Í£zÛZ^¿ó%»Û€k¹Ù]Éµ«³Î¶Èşö+‹¤K©ÈÊ5×š.¤òS³C•¸C¹ŸÄñ[`˜y\Õ×,ZF¹u¿VÒR#“ëb=nÀ '÷‹Àm›é†²û±Q(.¿»ğoGÒI±Ğáq³qe¨ÇW7\éœ‹¹ô«PÕÀ†¶ò¿5bö„Ú÷)ğğÑ2+R¾{2¥íWwÁ?«,x+)JMU06g040031Q(N-*K-ÒKÏg˜Å<åAXèÚŸüŸ_ßÜ}ôdšßÂ¿ ^@ x•A
+Â0 =çù€²›M6ˆø•d»mÛJLo}‚—9Œ¬ó|kÖAwhUÕ
+Pq< Dõ.(cr.’è˜¨à0H)±7\uÙÃ"$Ê‰²¦â¥ë¼°bñ%bB“·6­ÕjU{ÖW^tï·çtõ$ë|±}"$dàÌn÷³¦ÿ4¦lãø±ïÍ1z@x+)JMU07b040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgø®*»[”Cö×·‹Nr…ßîÔì9ó© x•AÂ  =ó
+> Y¶,+‰1~e­m”Ö ú~ù‚×If2y¯uíÁzSµ\‚0Ç¨‘„©øÈ}&q0ãìI&/AÔ¼¤é6Ä”Ê™‰pv¡pRŸ]	òHB"Èa2òéËŞ¬6µıÊ¦Ûı¹¾—[ÕSŞëÕ:ö8í<€tœuıÇ1)j~•ä=cx•Ém1 ıVj H¤€ÀH+\‘²X»¬¤şì'ä;˜yL;Æx,9\Ö4ó¥
+sT(Ìm«£š6K"ÛE“’aÆê¾dÚ¾¼’Pèœ;uŠ{VB=]àÄEıùf°l’0!I”¤r¯ª9p'ßë~LoÓü‡ıÈnûíùxİ?‡½·c\=Pª˜Sòo!…àNz,ûOã†Í›¹_:OL_xÍXmoÛ6ŞWëW\¬WÃAÒ­(ƒÛ¸MĞ%â´İĞõ-Ó1™ò$*†;ä¿ï9’¢$ÛéÚîË$–Èã½ßsGOÒlB??;|òÃR$·âFÒB(Ej±ÌrCqÔéNÖF]<$ùzi²}ÑzKÔr.óÆ¶L¦óök!šïiª–F%¥ùB4_s¡§İb.yÊ³…á¯4»éF½(J2]š¤Yr;VŸ%ÓÁÓ(š•:¡b½XH“«d¤­ÒñTA>²)}º•ëğ¬3HÿÖ£¸"‘yå=ú;ê¨¥RÇ8Ó£½ã†8ìuriÊ\“ViŸ İ`ÄÇfq÷L'YËÄXY´ëö¢Î}Ô±Úö	ìéè˜àÉÁ…\½°.´"¬<Ş…(pe*'/îYŞQ'1–«‹ˆe|}{‰ÖN8­#Gäô„]%âV»ÙTö³»Áïo®^ËõØäR,âÖÑ>Y:pôNØØ…zÑıf8N¤G‹6Äâÿ—¯ôîÔøï¶LßéæäJ3`‹w÷&UÃİ(W3®* ¶Y\@/iÎeQp‰#êİ×*Meş\ÊâµÆ¿ƒÍwTÚş>m|ŸPø{ru8é/s¥’şTæ’TAfq’¨K©-ü1uÿÔ\WR…òƒ>®ğâ)§+*	h5VOŸ¯´.Ÿ}š¼¬Î³¶†A-§bÔA6=gäjr·Ì˜­+û]Ùïr`‡WRLãíâñ•¼8Á87V‘>y>Œ)5L¼Dİ¥qwÄrD?Şu-w(‚2B,ruÈ§şôM]³^ãâáı2èAcN6Ë5PVÎ6EßcÔC&Ívšv·Lªğ¹.Œ<=¾xø{>á`Ñ}8G¸1hÆ®áğ£À;ïse¤ÃF„Ã!oŒËE¨î´»“¹š­·¥q³êz4É2ôÿA«ûè¯ùÓT©OY+Æ¸`ÕªeŞ‰¼ò16c¢¯ÍE1÷Êº…›aıÂã`d5ÆVü\¦éš&y¦é“ ªÓ29¦F4|•ûó=ï_Îî§Ã‹W#:ÇC|_¿¡woÎNèìâzôêêìú¦ù’ØrÙşDûø4B±%šµó
+ oö·>úF'ö{kwß·¶©/ËÉPO‚w@*Àmü@‹wÈB¬õÉ¯”À,$'e~g¡ÏQcÆ‰‘jËÆ)Æ$¦%¼’Zæ_Iæ8òÍhÒYVŠ0ûZâ –8¡Iğa½ß§p0$;ìÛŞ‡½Mkq,Uí……f!:ğ˜ZŸŒ^œœÖ¾Çæ`ôgç_£.\›œd“K¨fcÆÏåì¤í0GÁ½+»·/@ÇË&ÎY¥÷\ãhhP© 3íÎ®#A¹>5Õà°!öl÷8@B=©cgS°Õ¾_Ï~»Úõç{’i!íÚêq™$¨ÿY™ZÚ=OÌÅÀ°Y(\=`9òÃææş>ykTª>£YyB“Q¡n4¡ı’+`šÊTáqMÙË4y°v³¾ƒÄéR¨¼*¿BlÕ/Uùm­¯ó+¤²dÍRªÙëÊàÒhŸş­öØU¶…c"g¸…ÌÙ²•Ô†V G<*3ç|âjæ-Q•›ä¯	u-!÷ÕŠÖ|m}²'cf`+oÃ- :lÜyıáf €CÇäÛ"Ú{¢‚pLhÕ²G‘´…>ØğèZÇMär°Ğ'{¾7áx¨Q—\ÿÁˆ*ıĞ½œ`§ª.Ûîrßh„o .!ŞÙn€^e+ªn®–²F’:fÔ´hng“®ğßÖhş¾ÙS•ĞÆÈ.âÍ¡¸oâë;CnÕg|“k±äQv»E„ŠN5ò´âL3¡R9İóiØ"zŸ•é”ÖYI©º•„*]dS:¶û;‰U0~¥³ôÔFb˜ÀÅ OîùJx\æ ·9`QA¦_{"–‹¥YÓ,Ë)ËÕÒ"íá.RÎG-Wç~©fæ0N„†5êmgyıÎ·ên×"ZËEÈîšÈŞÓá°:ë\Oìï¾£Ø4pqéÑñ1™¼ÜÀLëá4³¥­üLïQe.Mş÷ëø¸Ë<®ë{­DáÜ¯ä””†T¡e6ãò2p¡(€ÔĞ¶™n(»ï›} Ûö‡ş±È¶N,tx¾lÜ;Û1µÕ9¿6¦Pşu#ÄMle~kšD(wõ£]‡ÊÜdö‚	Óî£ —Wux+)JMU04¶`040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*J**ÍĞKÏgò;ß•yñ{pÒâeGÊC®Y/Ë21 …äœÌÔ¼‡ğì…Y“cµ^~õZİµ0Ùz},DAqjQYjÿê'æ^î›*Ò=ª~©¦r^Şó İá7lx­TmkÛ0ŞWëW\§ÍÒµcƒú!8ŞRèì’„ÂèÊPl¹1±%c+eÙèß$§	sƒ}Šr¾—ç{î–¥ZÂÙûç¯j®ùƒ€Š’±¢ªU£!`Şé©¿Üä…ò™ç§Í¶Öê´á2£¿y¥ñJõ`R8‹j}6`,U²Õ°âíj^üp	ïÎM*™
+g<ûÀX¾‘)´BfAÆ5‡»ûåV‹!¬ÅÖ½Xã ~QÑH4P‰¶EÜÌ3áâ;Xç;„RÈ “Ì#Ø£™àY`\Ñ’õJ4CøNaí¶ª„nŠÔe6@‚!¸ æaË£›¦:üë(†ä„W7Óhv¯³oÒ·m^¬I@§_Æ!è• kÕâ‡¯kì´rVæI#m×‚‚‚áï-=Ï§…)	µÚ3Nâ0:p¶M!ÈœÅµ«LùF£‘mdl1[µR/‡—]œm“›É€!äÄrjšêQ4Ğªt-4±¶H&	~ìi$ºf_Ó«øóA7{œïÍ£x§ÖÈpt˜Ù8uY¯İÄ¡7ìÆôä”ÚˆôÑ±´Ó*®I=÷jw©Té”ò2İ”8d(dV¤¢%´%¾€Dß2ùHò	í
+‚ìšƒ7|³7AzãÄMˆaöÓ
+¹Y²ë²Ğ°©»Zf(¤;³woávåï÷di?ï>unTİ¬(ÓìÁûş9şñö)d2^Œ´A=¾°ÿ¦¦YŞşUMÆ©_MÌ#(tpöîÍD˜KÖ{oŠp1Š|k.‚&	˜Ãd…Ë^'óÂ$£pq•ÄÌ{¦¥”¿ä¬*ù(p¢ÎyÙâåDQ£.cwMQ™¨I+hæ;eÛÆCjWB7Á~‡æ|xKÊÉOR0`  	°ğxÍXmoÛ6ŞWëW\¬WÃAÚ®(ƒÛ¸MĞ%â´İĞõ-Ó1™ò$*†;ä¿ï9’¢$ÛéúòeKäñŞï¹£'i6¡'Ïü´É¸–´JG‘Z,³ÜPuº“µ‘EI¾^šl_´ŞµœË¼±-“é¼ıZˆæ{šª¥QIci¾Í×\èic·˜‹G¿>å…ÙÂğWš]w£^%™.MÒ,¹«Ï’èàiÍJP±^,¤ÉU2ÒVéx*Œ Ù”>İÈuxÖ™N¤ëQ\‘È<ÏòıuÔŒR©cœéÑŞQCö:¹4e®I«´OĞn0âc³¸{ª“,Ïeb¬¬Úu{Qç.êXmûötxDğäà\®^XZVïB¸²÷	•“÷,ï¨“ËÕEÄ2¾ºŒ½Dk'œÖ‘Î#rzÌ.q#ƒİl*ûŠY‚İà7—¯åzlr)qëhŸ,8z'lìB½èn3ÇÒ…£EbñËWzwêü‚w[¦ïts‹r¥0„Å»{“ªán”«WÛ,. —4g²(¸Äõîk•¦2.eñZãßÁæ;*mŸ6>Sø{ü(êpÒ_äJ$ı‰Ì%©‚Ì â$R—R[øCêş¥¹,®¤
+å}\áÅ-RNWT2Ğj¬>_i]>û4y;YœemƒZNÅ¨ƒlzÎÈÕän™1[Wö»²ß	äÀ0.¥˜ÆÛÅã=*yp‚qn¬"}ò|S6j˜6x‰ºKãîˆ1ä~¾íZîPe„XÜçêNüéëºf½Æ=ÄÃû?dĞ½Æo–k ¬œlŠ¾Ç¨ûL
+ší4)ìn™Tár]yr6|qğ÷|Â1À¢ûppbĞŒ]ÃáG;€wŞçÊH‡‡/BŞ—‹Pİhw+s5[oK7âzÔõh’eè@«ûèïùÓT©OY+Æ¸`ÕªeŞŠ¼ò16c¢¯ÍE1÷Êº…›aıÂã`d5ÆVü\¦éš&y¦é“ ªÓ29¢F4|•ûó=ï_Îî'ÃóW#:ÇC|_½¡woNéôüjôêòôêO¦ù’ØrÙşDûø4B±%šµó
+ oö·>úFçÇö{kwß·¶k©/ÊÉPO‚·@*Àmü@‹·ÈB¬õÉ¯”À,$'e~k¡ÏQcÆ‰‘jËÆ)Æ$¦%¼’Zæ_Iæ8òÍhÒYVŠ0ûZâ –8¡Iğa½ß§p0$;ìÛŞ‡½Mkq,Uí……f!:ğ˜ZŸŒ^ŸÔ¾Çæ`ôgç_¡.\›œd“¨fcÆÏåì¤í0GÁ½+»·/@ÇË&ÎY¥÷\ãhhP© 3íÎ®#A¹>5Õà°!öl÷8@B=©cgS°Õ¾_O»Úõç;’i!íÚêq™$¨ÿY™ZÚ=OÌÅÀ°Y(\=`9òÃææş>ykTª>£YyB“Q¡®5¡ı’+`šÊTáqMÙË4y°v³¾ƒÄéB¨¼*¿BlÕ/Uùm­¯ó+¤²dÍRªÙëÊàÂhŸş«öØU¶…c"g¸…ÌÙ²•Ô†V G<*3ç|âjæ-Q•›ä¯	u-!÷ÔŠÖ|m}²'cf`+oÃ- :lÜyıáf €CGäÛ"Ú{¢‚pLhÕ²‡‘´…>ØğèZÇçMär°Ğ'{¾7áx¨Q—\ÿÁˆ*ıĞ½œ`§ª.Ûîrßh„o .!ŞÙn€^e+ªn®–²F’:fÔ´hng“®ğßÖhş¾ÙS•ĞÆÈ.âÍ¡¸oâë;CnÕg|“k±äQv»E„ŠN5ò´âL3¡R9İóiØ"zŸ•é”ÖYI©º‘„*]dS:¶û;‰U0~£ÓôÔFb˜ÀÅ OîùJx\æ ·9`QA¦_{"–‹¥YÓ,Ë)ËÕµÒ"íá.RÎG-Wg~©fæ0N„†5êmgyıÎ·ên×"ZËEÈîšÈŞÓá°:ë\Oìï¾£Ø4pqéÑÑ™¼ÜÀLëá4³¥­üLïQe.Mş÷ëø¸Ë<®ê{­DáÜ¯ä””†T¡e6ãò2p¡(€ÔĞ¶™n(»˜}ø—"×7y²lÜ8yX«+RîlŸü£F9[ÖJøÖ‰îjC»•¹Éì½İEÿ÷ª	ûx+)JMU045f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©¬še¹‚§èpÓ¼‹?}Ùn[ûôi×AU§•¥e‡üni–âyÖê×ìã\Û¨Î-aØ §ô9ÇxAjÄ0E»ö)t)’cË6”R˜“(¶Ì„Nâ!QîßĞU×]¾ïóêX×ÅÀ3¾Ù®
+¾QS/¾§¤11y	1•6—¹³JgÁ–É½d×Í ·\Â5cæP¸÷\…c ŠsÄ^¢§š™ÈÉi±ƒØ÷²c{†”àã/}™¬ç»¶ó(…2áÁ¢«¿•¦ÿõİı:¸rµÁ8­¶Œì!vÀkóSW±¥ºÊMSAxKNÄ0DYû}PûŸ‘Fˆ3pƒ¶İI<²Û ¹=V¬YV©ª*·}_ÌÅ=Ig†%jFgt¤ê±jc(¤ämÉÈ¢ÉÅ"UÎ‹ºQçãS*KôŞTJLì’1º„²A½Ç1XES>Z’ÏõíØ\Œpı«Ş„öùÂe¾‚îbÑzƒğŒQåß•ÂÿåÕ;é3Ëì\ ¶¾“€4 mkßûıv
+im71ÌqæÒ÷¯GëQ oëyXı ²_Áxm’ÁJ$1†÷ÚyŠ2»±iD<)âAEvë"éÊLa:’šUwñİ­¤g…UOIWW}õÿUé]èáèèû·Í
+a4ä•¢q"C­*İo--;r>\XåÃcù
+I«F©ÃC¸0~™ÖæüÆøI(,ál#øGãàörÑBB¿$¿K11Œ˜’4Wvë OL†ñXÁ{†İ©\ø«ªéî"1Ö?õ/rèt.Ü{İˆœW5¡²™ú½ Œæ'uFÆÕš‡nA<Æ­Câùñl6ÓªÈ–ä=I&—;Vâ»;7,UB‘éQ‰íSGèy'ÚÑL âØOÄk1eüÒ•hÍ/ìôq»ÜT6Ä¢ ¢Yb1PvÒ]ãÓªCê,óY•¬©»‰äÙÖúŸ8”iÏ!ûªXB-<ä1L¼.3,«zÿŞïgIr¾™(Y\¹î@gEò{·¯ç£š\Ğ|Æş/íjZùô2¦!‰B8ø÷Ê„_ÕìKÓ¸xÍX]oÛ6İ«õ+n¬WÃAš­CÚ¸KÑµêvĞõ–é˜‹LyÃòßwî¥DÉŠÓuİË´¡Dò~Ÿs¯2Í‹)}{üıñW+•]«+MKel’˜åªpÒ¤×Ÿn½.ûXdn»òÅ¡ÚyÊÌj¡]k[g³Åîc©ÚÏynVŞd­W‹¥j?:eg­İr¡}÷˜_Ì—åÅU?$IVØÒÓ4/²ë‰ù¨é”'É|m3*·Ë¥öÎdc+F§3å½ÿÀ®éZoãÚ6ÓÕÓ€Òúˆv®pú+é™9åÚ¦¸3 ƒÓ–:ìõœökgÉš|H°n4ækó´ÿÜf…s:ó¢«„uıAÒ»Mzbí NN	‘½Ò›§BQ!úxª •¸O	N}é@d'½Ì‹ÔüæuZi?´Ñ³s	ŒXªkıfW9V,âF¿ıòú…ŞN¼Ój™î\’œƒÄ*]˜—ÜvÓq®C:vÎÆ\üŸóò™Ñ?İ×÷†yGj¥0¤¥
+w÷T+Ü€«ŸÔH¥ŠKØ¥ıK]–qd½ÿÂä¹vO´._XüwÔ}Ò©ósôè˜â¿ãGI‹şÒëQôÚi2%ùH$h:¡>=¤]å©ÿ»e8¯äğƒ=xéÎQ.W (›ÇO6Ö®øcúvº9zYìZÍ
+&&=TÓf®¶tÆbì÷UPÈ‰a½Öj–ŞOÉˆä;„ºC†TÉaNé`œ6zÜåiÌrB_ßôE:Œ‹ûBë£tĞŸ½j0[Y<@>ªøÇ
+º×™ó.\ãÉ:¸Ñ§äKœºÏ¥hÙ^—âî—j¾A­+¯/^=½øUÁ1Á¢ûppbÒLCÃá¥ä	àwÎx¸é¨@È“õ2U"ÛİhgæÛ»Ú½ºÚCuš…ı°Clÿ¹Fı´Mt6†]i{¹Ù{TÒo¸]3„o1¼Rõf=4ñBè#[»i8~œ",«Ö-®gQ~ÒV» /(ÒWşuå÷Vµ!,¾Ñ8‚'Á@XóÑì)^Œ‰ÿáÁ4îu½ÅµèT½_´‹&UÄsk4~z~Ñ(øŸ£;AI´ŸƒÿÜ(}ZL/ašäŒ×ë)–¤»iNzŠy6OŸº v.¦!X•È*r­«CTnmÜ”}W¢qCj›ÁiC9SBñF¥ÕÑ NJp§Õ<;{şóøœ8Ô¡—Ü’ÎK-ãR›T&ë,C'š¯s9{Pæˆ¢¹v~¸ÙAääŒ=<ò•·Şäæ#ˆµ:è*Í•%´
+
+¸§™Î–[*æxMgã	a.Ä„<]*ãjø•êşøU]ßâ}S_±äP8Ö†š®FëÑ¥ tHÿ„=•´tïI‰yÁm´õ´q/_p=1šyKÕğ`—ª‘¶ÁjïAchãÁçâ“#™² A^',Ëjv	ƒÂŞQıF9Rà¡Sª(ÔÌ‘¨®¢FËzÜÀ±÷'P´¥=êDt+Î&¯ÚÌhaHr¿Å7ñzÄh(Æt¢Nä°îf±Àájİt/p¢À¥ ~•î#ÀˆÊdü2­F ¥Ó0I“³k
+›KåŠøİ#ß-”—‰oÁÕ§¬÷º|s*¾ğµUu~#É­ûÌŞ‰o/]FDçuZK¦¹2¹Te¸sè]±Îg´-Ö”›kM@é²˜¡)‹¥Á‰:?Òó9•ì´^;Â·,l.0Ãº)±\9^Ø±ª¨“šÜHõrå·4/Î\«òæ^åTZ½©Æ*e"&™²ğæA³<où°ßFÛ:>£Lù¦‰6Uzâ°*«Î<-eò2 ÓSònİáL‰pCšÅJ_Øª½À€_}ÛJà÷ğ.ËxÓ|ĞF•!üFÏÈXhU¶4¾›7pP¥Ão	¦†µírì„¶»ÄÌdMãWçò»»	ÖfÚ–?
+ğ6¤uâE¯óÄ‡0c7V®İ&w‘ƒxÍXmsÚFîWô+ÖÌ4#ÛqOi‡{R;ã$í¤ù Äa.'ª3¤ãÿŞgïN'	pš¤_ÊŒt··ïûìã(ÓÁÑó£AxÜšRyœ/â$#ßk4Ç«L¤M<„Éj‘Å»Aí-”‹™H*Û"œÌê¯iP}"¹ÈdXYšÍƒêk¨Ie7{Oya:Ïø+Šoš^ËóÂX¥£8¼ÉÏ‚zÔ=ô¼i®BJWó¹È•VÚŸY@>²)mº+÷¬b
+ûÖ"¿ I'-úÛkÈ)EBù8Ó¢^Eö‰ÈòD‘’Q› ]gÈÇ¦~óL…q’ˆ0Ó²Rh×ly{¯¡µmØÓqàÉÎ…XhjZïB¸²	•‘ç·4o¯fš«‰ˆf|}å[‰ÚN8­!ŒGÄdÀ.óàV8»ÙTö³»Îïo®^‹Õ(KD0÷kGÛ¤éÀÑ:amêy÷ëá­‹Åÿ9._éİ‰1ğŞ­™¾ÕÍ5È•jÀëîuªŠ»Q®Ù¨¨ _gq
+½Dv.Ò”KQo¾–Q$’B¤¯şu×ßQi»»´öéîí“ûÛßóœô—‰T’şT$‚dJÙ b$S“S]øcjş©¸4®Då}Láù5RNWT2Pk,_,•Ê>ß—İó¸®¡SË¨è5M/¹ªÜ53fkÊ~[öÆ¡Î•&şfñXOºJŞ gœ†­H›,Æ”µ¦u^¢î"¿9d9¦ïšš;A!¹ÚåÇšÓê¦¬Y«qñ°şwô 1ƒõru”…sMŞ÷õIN³­&¹İ“
+¼A®™8=ïŸ<ü-›p°è>œ#Ü…4}ÓpøQÇà÷‰Ì„ÁF„Ã!oŒò¹¨n9´»‰œ®6¥gÁÍ¨kÑ85Ğÿ=´îÃ¿räOU¥6Af©ã‚V«”y$…)Õã5xm¤3«¬Y(±ÖÏ- F–³ Ó?Q´¢q+ú€ Õ©™ô¨[åö|Ëú—³ûä´ñjHçÃÑ¨ïë7ôîÍÙ€Î.®‡¯®Î®ÿ`š/‰ÍgmÿA´O%¢Y;« òfwã£¡ox1Ğß»»¶µİu™ûj¼RnıŸxbX¼Cb­Mv%î° !9Ì“;}†3T[TN1F 15aç•P"1ü|‡L"Á‘oF“Æ¢P„Ù—;°Ä(MœËı6¹ƒ.ÙaÿH÷ßí­[‹cÎ¨bÏ-TÑ€¿ÃÔòTgx28-|ÍÎ#ÄéÏÎ¿F]˜69Ç—PMÇŒŸó1ÙI›aö÷.GnŞ¾t /gY–Ös•£m A¡ÌÔ;Û8åÚTUƒÃ†tØÑİ§c Á	µ¤†NÁZû~Ù?ûm8 vµéÏ÷$¢Tè´
+Ô£<QÿÓ<Ò´;–˜=Ša½P¸zÀrÔç‡õÍİ]>ò6“‘üŒfe	³˜Ry£í—LÓDD+Š§X¦şpÄƒµ™õ¼ N—LŠòKƒúã¥"¿µõe~¹”C6€¬Zj@5}]é\êmÓ¿Õ»J·pLD£·[¶*£%À2›q>q5óVP”›d¯	e-!÷•Š–|m}²'}f +oÍ- lÜzıáf ‡zdÛ"Ú{¢€pLhÅ²Ç‘´©ê®yt-ú£‹n¹,´IŸ¯à;îjÔ$×¿3¢dÛu/cØÉ¢ËÖ»Ü7aˆIˆwº£k „UY‹*›«¦,‘¤ŒY55šëÙÄ¥+ü·1š¿¯öT¨,MÄ›Cà¾‰¬í.¸EŸ±M®Æ’GÙÍá*:RÈÓ‚3M‰ÉMÃÑû8&´ŠsŠä­ Té<`ĞÑİßH,‚ñ+M)¡§Ê†	\Úã^,eŠÇE 1›åä`úÕ'|1_d+šÆ	Å‰¼‘*ˆZ¸K€”óQ‰å¹@Š™…9ŒÂ@ÁšGå¶±¼|ç[u³©­æ"dwI¤ïépX™u¦'¶·ßQt˜¸´¨×£,É×0S{¸Íx¡+?V;TXK“ı½@;~î2ëò^EË 5î—bBRAj R™­ÇdeàB‘©¡m5İPvß7û ¶õ-üc‘nXhğ|Y¹w2¶cj+;¬çıl>t:ìxûŞë™NÑÊ|Ê¿{¸¬`ãk5Q›3ämjÛ¡<Éb}õ„Ñ÷Ş/æCbüd?|òì »'¦O»ÁÁaxtğ¬îuŸ‰®8œ>ötúdêıG›x+)JMU06g040031QHÎÉLÍ+ÑKÏg°û'a½s_kãŸ¦Ÿ„/T
+ü½ QSÒxKn„0D³æŞÍŠÁ?£(Êrˆv»høÉ˜ÅÜ>(‹(ëHµyR=•Š·e™Š2¶}+YD¹„ÆhŒâz“"¤(è-:íÄ@®vÊ²^b‚¾÷âDk[FH÷Ä#{¢6mû´1¬ÑB+Éy ë¹³ÜBß	ˆO=º¤SEg·¬¨<§õØÖÙ"ª÷¿ôYh9ïÏhûÖáUk«uÅ?¯Šü×¯¾$¢B¦•Gu[hZojKj,e?M3Le<ÃıšiÓ<K®ƒÈQïg˜'n8¿ö²™öñU}'m¾x+)JMU045f040031QrutñuÕËMağyŞºà”Gš‹pÀñ“3f¨”Êƒ*JÎÉLÍ+ÑKÏg“äˆˆ;ó‚K¡ïÇ*Å“/ŸM€)*ª,(ÉÉÏÏ)©4²õ·(.¸QWÒ>eïám}/»6ÖG@U§•¥e‡üni–âyÖê×ìã\Û¨Î-aØ Òœ:üxÍXÛnÛFí«øc¨FáÜ0
+ÇVc#µcXNÒ"ÍE­¬©¥Ê‹%ğ¿÷ÌìrIJ²›¤/`‹Üûœ™Õ8IÇôìåóg?-¢ø&ºV4´	=_¤YAaĞéW…Ê»xˆ³Õ¢Hw£Ö[¬3•5¶U<™µ_ó¨ù$zQè¸±4›GÍ×,2“Æn>‹<ÁÓyÁ_IzİzA§&/hœ¤ñÍHQt@{/‚`Zš˜òÕ|®ŠLÇC#J‡“¨ˆèã'6¥O7jåŸMjbåŞzV$*ËÒ¬G_ƒR¢Lˆ3=Ú9hˆÃ^'SE™2:é´ùØ4ìš8Í2"+‡vİ^Ğ¹:¢mŸÀöœ«å‘¸PDˆ<Ş…(peî*+/ì	ï ÂÕFD_]†N¢Ø	§u”õˆš³K Ä<ºQŞn6•}Å,ÁnğÇÛË7j5*2ÍÃÖÑ>	8:'¬íB½àn=ÇÊ†£EëcñË7zwb|À»-Ó·º¹Å¹ÒÂâÜ½NÕp7ÊµUJçĞKg*Ï¹Äõî$*{¥TşÆàßŞú;*mw—Ö>{O’ÿ{ú$èpÒ_dÚHú•)Ò93€ˆ•´O]zLmá©û—ár\I4ÊúØÂ[¤œ®¨d$ h¬_¼ZS¾ü<~7^î¥m½ZVÅ ƒlzÅÈÕä.Ì˜­-ûmÙor`‡—*š„›Åã<é+yp¼q7¢HŸÆ”µ¦~Cİ%awÈ²O?ßv…;A!÷¹ÚçÇšÓæº®Y§qñpş÷t¯1Çëåê)+çz›‚1ê>“¼f[Mò»&Uxƒ\
+urvxtğ÷\Â1À¢ûppbĞmÃáG‰À;2](‹‡+BŞ•óPİóhw«2=]mJ/¢ë-P×£qš
+Ğÿ=D÷áß%ò§©RŸ ³VŒqAÔªeŞFYåcÊ%c‚¯Í¢|æ”µ56Ãú¹ÃÀÈrRñ3•$+g©¡ÏPÂä€ÑpUîÎ÷œ9»NÏ_él8âûê-½{zL§çWÃ×—§W2ÍCbËd»íâÓÅ†hÖÎ)€¼ÙİøôÏå{cw×µ¶ke.Êñ¡™ oT€Ûğo‘…Xë“[)Ç€;,$Çev+Ğg©1ã„HµEãcS¯•Q™åzdR|7št•"Ì¾–8€%VAhâ}Xï÷ÉôÉûGÒ[B¿·n-y£ª=¿Ğ,DşSëSƒáÑñI-àGlöæX!^vşêÂ¶Éq:¾€j3~.Çxd'm†9èDÜ»<¹}{è :^:¶Îr,çGû@ƒJ˜);ÛxåúÔTƒÃ†tØ‘î3°€à…:RËNR°Õ¾;<ı}xLìjÛŸïH%¹’´	Ô£2QÿÓ2ÚGÌÅÀ°^(\=`9:ä‡õÍİ]>ò®Ğ‰ş‚få‹”r}mí—lÓD%+J§¹,”Ñzšft¬§Ó ı-Ú l‘ÎªjÌ£rä¥*İÅuºùDr€¬Yy#·—Á…ÔkŸş­ÙsÒÑ1 R\JflèR™‚–ÀJ<êbÆéÅÅÍ[0ÏÛçnui!ÕŠÖ|k¹²cCf …¸æ–
+_-Tn½qoˆ Käº$º{¢BtlÕD²ûŸÃ¹Ù[óèZÎ÷š@fQ¢Or¾?ş¸/Y›Şˆ*}ßÌ¬`§«¦Ûnzßi„ë'6!ŞKƒ „SYDÕ½V(k`©cÖ QwU|ºÂ“ú‡f‹Õ‘)
+ÕE¼9”®Ÿ¸ĞºFáƒ[µ×óZ,y²İì¾Àƒ<­8Ó4Ò‰šì¸4l}HËdB«´¤Dß(BÑÎÓ	æ¬Ä*¿Òé”òzšBa¶À=¡O)®	ÙRçx\dÀ»9`Q^†a9ªù¢X{šékm¢¤‡«H9Z¹¤a˜Ã(¬yTo[Ëëw¾dw»p-!»k"¹¶ÃauÖÙÙß~e‘4°qéÑÁY¹¡âáCÓ…T~jv¨²w(÷ó8~3«úšEË(·î×jBÚ@jdr]¬Çädà~‘¸¡m3İPv?6
+ÅåwşíH:):<n6®¡õºİJ·àLlL¥_…¦?›ÙÊşÖ€Ùjß¥˜ıÃGË¬HùæÉ”¶[İÿ ØÌxUÛnã6í«ôS=te¬¡¤[ôyH“¦)Úmƒ(À&è%S6‰H*Y·›ïRÖÚÎ]¿X^fæœ™3Uk*zõå·ÇŸõ¢¾+IP:MU×ë)O“¬e2|ÔvÓ{s$ëåzéÄîºmUïUÍ¦¦óü×šÿuÂ¯*¾µ;Æñ†WÌÒYšÑ¥ĞK·÷’”£i7äK«%—ÔXÓ‘6¶-İüRÎÉI½TzE²ÎS'C
+s²ÒV;:ı¡¤{¹!¥©ÚxI_õi3è6å•ğrr˜×FkB`Å>fôûáÎ?iR·JjeÕÎÿ,7s-CÕªZœĞJê«¡:ÕK>[|~²xc•—y|.Ï.eÛš·:›ÍÒù¾Ês\$¨š¾¬t½ÑN¦	CS”­”}şÕ1~¸d¥XJË.3Å¯òñ:˜BìÏş(½g`ú"qŒìäü2M¢	–kñø=Pqü?ZÊÚ+£k®P
+ÒçÑ<:iÁ²‹ÙÎéO¾ÂuP\½úú›|Æ1LÛù3cLåZX7à'pƒ ğz0Öd\äÏüq¬S+-À<p›>/P2eˆÿÿÒ¸1’7aE'½´LƒTÏËSò†I–E@¦úh‘_OµĞ\©ªáZ"@¡ß~¼8y÷i'Aì©sC'‰qŒÖ¸çì3Ôò1Çwñ“ö`Ÿş¨õ¶(¥Nùtt<¿·cœA· ™K)²ïD1‘.IÎ8”¡¾ƒ Œµ1ÇÎí‚øÇxy7-ï°|ÂãªÌ¿Øñ3Ëw§VÑò[ˆ?0;£“òvÄa@t
+ô ö­Î³‘z7Ô5Ä¡ÚvC½puH-ÍN˜ôõV{2@‘<î—ë %±#FIÀŞı„ÄrycÆ¾Ùß|&E„û?Ñs’6ôòRìßçc€GsÇôş}¸ğ9ˆVmH7ºÂ‹6ÇS|š=@a·ó@Üé9¾sÏb@¥ûoL/„j?Àx#m§Ğ}{8E ÉµÆI¨âäöoPd<ùŒ“âó2¬Èç
+ée¾î;ÆI-Úµq~ñ‘ †q•CPtÏYPòQû[õ7Ä¾¼@+?*¿Æ<a¥{®IÑó.–LÒ–˜ˆi¬o¸Ş!x;
+*;¬ÇIÀâÌÅ5—ìPÜ+Jmb §oòìF¾ƒ™0
+àö0"ß+XÖJ¦Xå/ŞêÜÏá‘‹¥	“cN|ïeÆa{¦Aì£álfÏŸİíuœÇqlGh!½Üj¸yJŸÒ…@Â{ref: refs/heads/main
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+0000000000000000000000000000000000000000 21ee521726b71c14a8727a61d074a98f9dd50831 atkinsonl477 <atkinsonl477@tamu.edu> 1749252623 -0400	clone: from https://github.com/killer-bees-public/cryptography.git
+21ee521726b71c14a8727a61d074a98f9dd50831 3f1996e5e006d2c71f866acaddc6aa2fbe1c104c atkinsonl477 <atkinsonl477@tamu.edu> 1749257200 -0400	commit: Added server and client setup
+3f1996e5e006d2c71f866acaddc6aa2fbe1c104c 2bbd87552f16d7be4b221d676c2010d0550c7063 atkinsonl477 <atkinsonl477@tamu.edu> 1749257257 -0400	commit (merge): Merge branch 'main' of https://github.com/killer-bees-public/cryptography
+2bbd87552f16d7be4b221d676c2010d0550c7063 83f47e07c2d0f868f47a33a9763b887c99923fe9 atkinsonl477 <atkinsonl477@tamu.edu> 1749303520 -0400	commit: Restructured format to allow crypto tools to be used by server and client
+83f47e07c2d0f868f47a33a9763b887c99923fe9 fd8946ea086496ff8ca654115b50f95a121c8611 atkinsonl477 <atkinsonl477@tamu.edu> 1749303574 -0400	commit (merge): Merge branch 'main' of https://github.com/killer-bees-public/cryptography
+fd8946ea086496ff8ca654115b50f95a121c8611 2d603763096c3a93916e9b4c884c6e1b456c7191 atkinsonl477 <atkinsonl477@tamu.edu> 1749303591 -0400	commit: Commented out section thats problematic
+2d603763096c3a93916e9b4c884c6e1b456c7191 3c9364db1b596de2c551381bf5386c904df3d446 atkinsonl477 <atkinsonl477@tamu.edu> 1749315838 -0400	commit: Added handshake functionality that establishes a shared secret
+3c9364db1b596de2c551381bf5386c904df3d446 d6870998b336fba63f2b43d9850a107f7a38c228 atkinsonl477 <atkinsonl477@tamu.edu> 1749315890 -0400	pull --tags origin main: Merge made by the 'ort' strategy.
+0000000000000000000000000000000000000000 21ee521726b71c14a8727a61d074a98f9dd50831 atkinsonl477 <atkinsonl477@tamu.edu> 1749252623 -0400	clone: from https://github.com/killer-bees-public/cryptography.git
+21ee521726b71c14a8727a61d074a98f9dd50831 3f1996e5e006d2c71f866acaddc6aa2fbe1c104c atkinsonl477 <atkinsonl477@tamu.edu> 1749257200 -0400	commit: Added server and client setup
+3f1996e5e006d2c71f866acaddc6aa2fbe1c104c 2bbd87552f16d7be4b221d676c2010d0550c7063 atkinsonl477 <atkinsonl477@tamu.edu> 1749257257 -0400	commit (merge): Merge branch 'main' of https://github.com/killer-bees-public/cryptography
+2bbd87552f16d7be4b221d676c2010d0550c7063 83f47e07c2d0f868f47a33a9763b887c99923fe9 atkinsonl477 <atkinsonl477@tamu.edu> 1749303520 -0400	commit: Restructured format to allow crypto tools to be used by server and client
+83f47e07c2d0f868f47a33a9763b887c99923fe9 fd8946ea086496ff8ca654115b50f95a121c8611 atkinsonl477 <atkinsonl477@tamu.edu> 1749303574 -0400	commit (merge): Merge branch 'main' of https://github.com/killer-bees-public/cryptography
+fd8946ea086496ff8ca654115b50f95a121c8611 2d603763096c3a93916e9b4c884c6e1b456c7191 atkinsonl477 <atkinsonl477@tamu.edu> 1749303591 -0400	commit: Commented out section thats problematic
+2d603763096c3a93916e9b4c884c6e1b456c7191 3c9364db1b596de2c551381bf5386c904df3d446 atkinsonl477 <atkinsonl477@tamu.edu> 1749315838 -0400	commit: Added handshake functionality that establishes a shared secret
+3c9364db1b596de2c551381bf5386c904df3d446 d6870998b336fba63f2b43d9850a107f7a38c228 atkinsonl477 <atkinsonl477@tamu.edu> 1749315890 -0400	pull --tags origin main: Merge made by the 'ort' strategy.
+0000000000000000000000000000000000000000 21ee521726b71c14a8727a61d074a98f9dd50831 atkinsonl477 <atkinsonl477@tamu.edu> 1749252623 -0400	clone: from https://github.com/killer-bees-public/cryptography.git
+21ee521726b71c14a8727a61d074a98f9dd50831 eb033c07412ef561a46c8471c2198e1e6f975f0f atkinsonl477 <atkinsonl477@tamu.edu> 1749257204 -0400	pull --tags origin main: fast-forward
+eb033c07412ef561a46c8471c2198e1e6f975f0f 2bbd87552f16d7be4b221d676c2010d0550c7063 atkinsonl477 <atkinsonl477@tamu.edu> 1749257261 -0400	update by push
+2bbd87552f16d7be4b221d676c2010d0550c7063 bfd0ec54e9c1df65901101bcc4cf6f15791b54d4 atkinsonl477 <atkinsonl477@tamu.edu> 1749303523 -0400	pull --tags origin main: fast-forward
+bfd0ec54e9c1df65901101bcc4cf6f15791b54d4 fd8946ea086496ff8ca654115b50f95a121c8611 atkinsonl477 <atkinsonl477@tamu.edu> 1749303578 -0400	update by push
+fd8946ea086496ff8ca654115b50f95a121c8611 2d603763096c3a93916e9b4c884c6e1b456c7191 atkinsonl477 <atkinsonl477@tamu.edu> 1749303604 -0400	update by push
+2d603763096c3a93916e9b4c884c6e1b456c7191 05310ce802b228133cc329f72d0820a0dcc1a594 atkinsonl477 <atkinsonl477@tamu.edu> 1749315890 -0400	pull --tags origin main: fast-forward
+05310ce802b228133cc329f72d0820a0dcc1a594 d6870998b336fba63f2b43d9850a107f7a38c228 atkinsonl477 <atkinsonl477@tamu.edu> 1749315891 -0400	update by push
+Unnamed repository; edit this file 'description' to name the repository.
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+d6870998b336fba63f2b43d9850a107f7a38c228
+ref: refs/remotes/origin/main
+d6870998b336fba63f2b43d9850a107f7a38c228
+DIRC      hDAk7¤2vhDAk7¤2v  ]Ğ9  ¤  õ       æâ›²ÑÖCK‹)®wZØÂäŒS‘ 	README.md hDl²8³TXhDl²8³TX  ^ª0  ¤  õ     zz˜.À'³‚£¡T:‹¶|éDŠ: 	client.go hDkt-³ThDkt-³T  `Ë>  ¤  õ     4¦äR#ÿ!Yù_™[1./Y  cryptoTools.go    hDq25TµhDq25Tµ  bÌ  ¤  õ     nrİ(Úe</ö¬—Z‰_ send-recv.go      hDió14°hDió14°  ^{à  ¤  õ     ~“ù6#>Ú€s~Ó†—¡6nÎ 	server.go TREE    5 0
+P–qÏÉ0ÖFT«Ä!%:O	Ğ1”âı%Œ2ÈccàØİı# pack-refs with: peeled fully-peeled sorted 
+21ee521726b71c14a8727a61d074a98f9dd50831 refs/remotes/origin/main
+Added handshake functionality that establishes a shared secret
+05310ce802b228133cc329f72d0820a0dcc1a594		branch 'main' of https://github.com/killer-bees-public/cryptography

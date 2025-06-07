@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
+	"os"
 	"time"
 )
+
+const fileToCopy = "recursiveBruh.txt"
 
 // Returns handshake from
 func returnHandshake(conn net.Conn) []byte {
@@ -50,6 +52,11 @@ func returnHandshake(conn net.Conn) []byte {
 	return sharedSecret
 }
 
+func sendSecretFile(conn net.Conn, key []byte) {
+	bytes, _ := os.ReadFile("server/" + fileToCopy)
+	send(bytes, key, conn)
+	return
+}
 func main() {
 	ln, err := net.Listen("tcp", ":8000")
 	if err != nil {
@@ -64,25 +71,12 @@ func main() {
 	message, err := bufio.NewReader(conn).ReadString('\n')
 	if string(message) == "Hello\n" {
 		fmt.Println("Initializing three way handshake")
-		returnHandshake(conn)
+		sharedSecret := returnHandshake(conn)
+		time.Sleep(30000)
+		sendSecretFile(conn, sharedSecret)
 	} else {
 		// Ignore connection
 		return
 	}
 
-	for {
-
-		message, err := bufio.NewReader(conn).ReadString('\n')
-		// if string(message) == "Hello\n" {
-		// 	fmt.Println("Initializing three way handshake")
-		// }
-
-		if err != nil {
-			log.Fatal(err)
-
-		}
-		fmt.Printf("Message Received:", string(message))
-		newMessage := strings.ToUpper((string(message)))
-		conn.Write([]byte(newMessage + "\n"))
-	}
 }

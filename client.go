@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const downloadedFile = "output.txt"
+
 // Handshake is very simplified from normal TLS, sending first message, returns AES key in byte format
 func initiateHandshake(conn net.Conn) []byte {
 	clientPrivateKey, clientPublicKey := genPubAndPrivKey()
@@ -67,6 +69,30 @@ func initiateHandshake(conn net.Conn) []byte {
 
 }
 
+func readFile(conn net.Conn, key []byte) bool {
+	reader := bufio.NewReader(conn)
+	var cipherText []byte
+	var err error
+	var by byte
+	for err == nil {
+		by, err = reader.ReadByte()
+		cipherText = append(cipherText, by)
+	}
+	cipherText = cipherText[:len(cipherText)-1]
+	//fmt.Println(string(cipherText))
+
+	var fileBytes []byte
+	fileBytes, success := recv(cipherText, key)
+	//fmt.Println("Decrypted message:", string(fileBytes))
+
+	fd, error := os.Create("client/" + downloadedFile)
+	fd.Write(fileBytes)
+	if error != nil {
+		log.Fatalf(error.Error())
+	}
+	return success
+}
+
 func main() {
 	conn, err := net.Dial("tcp", "localhost:8000")
 	if err != nil {
@@ -79,14 +105,9 @@ func main() {
 		return
 	}
 
-	// conn.Write([]byte("bruh\n"))
-	for {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Printf("Text to send: ")
-		text, _ := reader.ReadString('\n')
+	time.Sleep(30000)
+	readFile(conn, sharedSecret)
 
-		fmt.Fprintf(conn, text+"\n")
-		message, _ := bufio.NewReader(conn).ReadString('\n')
-		fmt.Printf("Message from server: " + message)
-	}
+	conn.Close()
+	return
 }
