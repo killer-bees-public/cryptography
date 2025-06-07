@@ -174,8 +174,8 @@ func ecdsaTest() {
 
 //////////////////     END     //////////////////
 
-func main() {
-	testSymmetric()
-	//ecdhTest()
+// func main() {
+// 	testSymmetric()
+// 	//ecdhTest()
 
-}
+// }
