@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"crypto"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,29 +16,63 @@ import (
 
 const blockSize = 16
 
-func symmetricEncrypt(data []byte, key []byte) ([]byte, error) {
+func symmetricEncrypt(data []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
-	cipher, err := aes.NewCipher(key)
-	var encryptedData []byte
-	cipher.Encrypt(encryptedData, data)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf(err.Error())
+	}
+
+	ctr := cipher.NewCTR(block, nonce)
+
+	encryptedData := make([]byte, len(data))
+	ctr.XORKeyStream(encryptedData, data)
 
 	return encryptedData, err
 }
 
-func symmetricDecrypt(encryptedData []byte, key []byte) ([]byte, error) {
+func symmetricDecrypt(encryptedData []byte, key []byte, nonce []byte) ([]byte, error) {
 	if len(key) != blockSize {
 		return nil, fmt.Errorf("Incorrect key size")
 	}
-	cipher, err := aes.NewCipher(key)
-	var decryptedData []byte
-	cipher.Decrypt(decryptedData, encryptedData)
+	block, err := aes.NewCipher(key)
 
+	ctr := cipher.NewCTR(block, nonce)
+
+	decryptedData := make([]byte, len(encryptedData))
+	ctr.XORKeyStream(decryptedData, encryptedData)
 	return decryptedData, err
 }
 
-// ////////////////    HMAC    //////////////////
+func testSymmetric() {
+	secretMessage := "KillerBeesKnees1KillerBeesKnees1"
+	//                123 123 123 132
+	fmt.Printf("Here is the message: " + secretMessage + "\n")
+	byteslice := []byte(secretMessage)
+
+	symKey := "i6Bwnnu8jbUbw1Mo"
+	//         123 123 123 123
+	keyBytes := []byte(symKey)
+
+	nonce := make([]byte, len(symKey))
+	rand.Read(nonce)
+
+	encryptedMessage, err := symmetricEncrypt(byteslice, keyBytes, nonce)
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	//fmt.Printf("Here is the encrypted message: " + string(encryptedMessage) + "\n")
+	decryptedMessage, err := symmetricDecrypt(encryptedMessage, keyBytes, nonce)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	fmt.Printf("Here is the decrypted message: " + string(decryptedMessage) + "\n")
+}
 
 func createHMAC(data []byte, key []byte) []byte {
 	mac := hmac.New(sha256.New, key)
@@ -92,13 +126,14 @@ func ecdhTest() {
 
 // ////////////////    ECDSA    //////////////////
 // Utilizing ECDSA to sign and verify delivery of an AES key
-func createKeyPair() (*ecdsa.PrivateKey, crypto.PublicKey) {
+func createKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		fmt.Errorf("Something went wrong with generating a private key")
 	}
+	publicKey := &privateKey.PublicKey
 
-	return privateKey, privateKey.Public()
+	return privateKey, publicKey
 }
 
 func sign(priv *ecdsa.PrivateKey, message []byte) ([]byte, error) {
@@ -115,12 +150,34 @@ func verify(pub *ecdsa.PublicKey, message []byte, sig []byte) bool {
 	return ecdsa.VerifyASN1(pub, slice, sig)
 }
 
+func ecdsaTest() {
+	privateKey, publicKey := createKeyPair()
+	secretMessage := "What the helliantte"
+
+	signature, err := sign(privateKey, []byte(secretMessage))
+	if err != nil {
+		fmt.Println("Signature failed!")
+	}
+	fmt.Println("Would you like to modify the secret message? If so, enter here, otherwise, press enter.")
+	fmt.Print("Enter (empty for original): ")
+	var newMessage string
+	fmt.Scanln(&newMessage)
+	if newMessage != "" {
+		secretMessage = newMessage
+	}
+	if verify(publicKey, []byte(secretMessage), signature) == true {
+		fmt.Println("Successful operation! Message is correct")
+	} else {
+		fmt.Println("The message was modified in transit")
+	}
+	fmt.Printf("Message: %s\n", secretMessage)
+
+}
+
 //////////////////     END     //////////////////
 
 func main() {
-
-	fmt.Printf("Whats good my fello friends\n")
-
+	testSymmetric()
 	//ecdhTest()
 	var message = "hello"
 
