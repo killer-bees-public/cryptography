@@ -88,6 +88,19 @@ func verifyHMAC(data []byte, tag []byte, key []byte) bool {
 	return hmac.Equal(mac.Sum(nil), tag)
 }
 
+func testHMAC() bool {
+	var message string
+	var hash []byte
+	var key []byte
+
+	message = "what the helly bron james"
+	hash = createHMAC([]byte(message), key)
+
+	//CHANGE MESSAGE TO VOID INTEGRITY
+	//message = "what the helly bruh bruh bruh"
+	return verifyHMAC([]byte(message), hash, key)
+}
+
 //////////////////     END     //////////////////
 
 func genPubAndPrivKey() (*ecdh.PrivateKey, *ecdh.PublicKey) {
@@ -179,8 +192,11 @@ func ecdsaTest() {
 func main() {
 	testSymmetric()
 	//ecdhTest()
-	var message = "hello"
 
-	var mac = createHMAC(message, sha256.New())
+	if testHMAC() {
+		fmt.Println("What the helly bron james")
+	} else {
+		fmt.Println("What the helly burton")
+	}
 
 }
