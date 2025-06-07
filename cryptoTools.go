@@ -138,7 +138,7 @@ func ecdhTest() {
 }
 
 // ////////////////    ECDSA    //////////////////
-// Utilizing ECDSA to sign and verify delivery of an AES key
+// Utilizing ECDSA to sign and verify delivery of a public key for DiffHell
 func createKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -193,10 +193,10 @@ func ecdsaTest() {
 // 	testSymmetric()
 // 	//ecdhTest()
 
-	if testHMAC() {
-		fmt.Println("What the helly bron james")
-	} else {
-		fmt.Println("What the helly burton")
-	}
+// 	if testHMAC() {
+// 		fmt.Println("What the helly bron james")
+// 	} else {
+// 		fmt.Println("What the helly burton")
+// 	}
 
-}
+// }
